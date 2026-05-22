@@ -2,29 +2,15 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable
 from datetime import date
 from typing import Any, Optional
 
-import requests
-
 from app.clients.spring_boot_client import SpringBootClient
 from app.core.config import get_settings
-from app.models.schemas import (
-    AnalyticsAccountBreakdownResponse,
-    AnalyticsCategoryBreakdownResponse,
-    AnalyticsCriticalityBreakdownResponse,
-    AnalyticsDailyTotalResponse,
-    AnalyticsDuplicateResponse,
-    AnalyticsPaymentMethodBreakdownResponse,
-    BudgetTransactionResponse,
-    RagAnswerResponse,
-)
-from app.services.analytics_service import AnalyticsService
-from app.services.insight_service import InsightService
-from app.services.llm_service import LLMService
-from app.services.normalizers import normalize_list_response, normalize_periods_response
-
+from app.models.schemas import RagAnswerResponse
+from app.services.normalizers import normalize_periods_response
+from app.skills.base import SkillRequest
+from app.skills.registry import SkillRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -61,18 +47,16 @@ MONTH_OF_PATTERN = re.compile(
 
 
 class RAGService:
-    """Tool-style orchestration over Spring Boot APIs without vector retrieval."""
+    """Skill-oriented orchestration over Spring Boot APIs without vector retrieval."""
 
     def __init__(
         self,
         spring_client: SpringBootClient,
-        analytics_service: AnalyticsService,
-        insight_service: InsightService,
-        llm_service: Optional[LLMService] = None,
+        skill_registry: SkillRegistry,
+        llm_service: Optional[Any] = None,
     ) -> None:
         self.spring = spring_client
-        self.analytics = analytics_service
-        self.insights = insight_service
+        self.skill_registry = skill_registry
         self.llm = llm_service
         settings = get_settings()
         self.default_period = settings.default_analytics_period
@@ -99,21 +83,26 @@ class RAGService:
                 period=period,
                 transaction_id=transaction_id,
             )
-            plan = self._select_tools(question)
+            selected_skills = self.skill_registry.select(question)
+            plan = [skill.skill_id for skill in selected_skills]
             logger.info(
                 "RAG execution plan selected period=%s plan=%s period_source=%s",
                 selected_period,
                 plan,
                 period_interpretation.get("source", "unknown"),
             )
-            context = self._build_context(
+            skill_request = SkillRequest(
                 question=question,
                 period=selected_period,
                 payment_method=payment_method,
                 account=account,
                 transaction_id=transaction_id,
+            )
+            context = self._build_context(
+                skill_request=skill_request,
                 plan=plan,
                 period_interpretation=period_interpretation,
+                skills=selected_skills,
             )
             llm_answer = self.llm.generate_answer(question, context) if self.llm else None
             answer = llm_answer or self._fallback_answer(context)
@@ -131,7 +120,12 @@ class RAGService:
                 answer=answer,
             )
         except Exception:
-            logger.exception("RAG answer failed period=%s payment_method=%s account=%s", period, payment_method, account)
+            logger.exception(
+                "RAG answer failed period=%s payment_method=%s account=%s",
+                period,
+                payment_method,
+                account,
+            )
             raise
 
     def _resolve_period(
@@ -237,311 +231,36 @@ class RAGService:
 
         return None
 
-    def _select_tools(self, question: str) -> list[str]:
-        lowered = question.lower()
-        selected_tools: list[str] = []
-        if any(keyword in lowered for keyword in ["overview", "summary", "spend", "total"]):
-            selected_tools.append("overview")
-        if any(keyword in lowered for keyword in ["category", "categories"]):
-            selected_tools.append("categories")
-        if any(keyword in lowered for keyword in ["top category", "top categories"]):
-            selected_tools.append("top_categories")
-        if any(keyword in lowered for keyword in ["account", "breakdown"]):
-            selected_tools.append("account_breakdown")
-        if any(keyword in lowered for keyword in ["payment method", "card", "cash"]):
-            selected_tools.append("payment_methods")
-        if any(keyword in lowered for keyword in ["daily", "trend", "time series"]):
-            selected_tools.append("daily")
-        if any(keyword in lowered for keyword in ["average", "avg", "mean"]):
-            selected_tools.append("averages")
-        if any(keyword in lowered for keyword in ["month over month", "mom", "versus last month", "compare last month"]):
-            selected_tools.append("month_over_month")
-        if any(keyword in lowered for keyword in ["summary", "summarize", "snapshot"]):
-            selected_tools.append("period_summary")
-        if any(keyword in lowered for keyword in ["behavior", "habit", "pattern"]):
-            selected_tools.append("behavior_summary")
-        if any(keyword in lowered for keyword in ["anomaly", "anomalies", "flag", "flags"]):
-            selected_tools.append("period_summary")
-        if any(keyword in lowered for keyword in ["criticality", "essential", "non-essential"]):
-            selected_tools.append("criticality")
-        if "duplicate" in lowered:
-            selected_tools.append("duplicates")
-        if "uncategorized" in lowered:
-            selected_tools.append("uncategorized")
-        if any(keyword in lowered for keyword in ["outlier", "largest"]):
-            selected_tools.append("outliers")
-        if not selected_tools:
-            selected_tools.append("overview")
-        return list(dict.fromkeys(selected_tools))
-
     def _build_context(
         self,
-        question: str,
-        period: str,
-        payment_method: Optional[str],
-        account: Optional[str],
-        transaction_id: Optional[str],
+        skill_request: SkillRequest,
         plan: list[str],
         period_interpretation: dict[str, str],
+        skills: list[Any],
     ) -> dict[str, Any]:
-        timeline_context = self._build_timeline_context(period=period, period_interpretation=period_interpretation)
+        timeline_context = self._build_timeline_context(
+            period=skill_request.period,
+            period_interpretation=period_interpretation,
+        )
         context: dict[str, Any] = {
-            "question": question,
-            "period": period,
+            "question": skill_request.question,
+            "period": skill_request.period,
             "filters": {
-                "payment_method": payment_method,
-                "account": account,
+                "payment_method": skill_request.payment_method,
+                "account": skill_request.account,
             },
             "timeline_context": timeline_context,
             "period_interpretation": period_interpretation,
+            "skills": {
+                "selected": plan,
+                "count": len(plan),
+            },
         }
-        unavailable_tools: list[dict[str, Any]] = []
+        skill_context, unavailable_skills = self.skill_registry.execute(skills, skill_request)
+        context.update(skill_context)
 
-        if "overview" in plan:
-            self._populate_context_section(
-                context=context,
-                unavailable_tools=unavailable_tools,
-                tool_name="overview",
-                context_key="overview",
-                builder=lambda: self.analytics.period_overview(
-                    period=period,
-                    payment_method=payment_method,
-                    account=account,
-                    transaction_id=transaction_id,
-                ).model_dump(mode="json"),
-                required=True,
-            )
-
-        if "period_summary" in plan:
-            self._populate_context_section(
-                context=context,
-                unavailable_tools=unavailable_tools,
-                tool_name="period_summary",
-                context_key="period_summary",
-                builder=lambda: self.insights.period_summary(
-                    period=period,
-                    payment_method=payment_method,
-                    account=account,
-                    transaction_id=transaction_id,
-                ).model_dump(mode="json"),
-            )
-
-        if "behavior_summary" in plan:
-            self._populate_context_section(
-                context=context,
-                unavailable_tools=unavailable_tools,
-                tool_name="behavior_summary",
-                context_key="behavior_summary",
-                builder=lambda: self.insights.behavior_summary(
-                    period=period,
-                    payment_method=payment_method,
-                    account=account,
-                    transaction_id=transaction_id,
-                ).model_dump(mode="json"),
-            )
-
-        if "averages" in plan:
-            self._populate_context_section(
-                context=context,
-                unavailable_tools=unavailable_tools,
-                tool_name="averages",
-                context_key="averages",
-                builder=lambda: self.insights.averages(
-                    period=period,
-                    payment_method=payment_method,
-                    account=account,
-                    transaction_id=transaction_id,
-                ).model_dump(mode="json"),
-            )
-
-        if "month_over_month" in plan:
-            self._populate_context_section(
-                context=context,
-                unavailable_tools=unavailable_tools,
-                tool_name="month_over_month",
-                context_key="month_over_month",
-                builder=lambda: self.insights.month_over_month(
-                    period=period,
-                    payment_method=payment_method,
-                    account=account,
-                    transaction_id=transaction_id,
-                ).model_dump(mode="json"),
-            )
-
-        if "categories" in plan:
-            self._populate_context_section(
-                context=context,
-                unavailable_tools=unavailable_tools,
-                tool_name="categories",
-                context_key="categories",
-                builder=lambda: [
-                    item.model_dump(mode="json")
-                    for item in normalize_list_response(
-                        self.spring.get_category_breakdown(
-                            period=period,
-                            payment_method=payment_method,
-                            account=account,
-                            transaction_id=transaction_id,
-                        ),
-                        AnalyticsCategoryBreakdownResponse,
-                    )
-                ],
-            )
-
-        if "top_categories" in plan:
-            self._populate_context_section(
-                context=context,
-                unavailable_tools=unavailable_tools,
-                tool_name="top_categories",
-                context_key="top_categories",
-                builder=lambda: [
-                    item.model_dump(mode="json")
-                    for item in normalize_list_response(
-                        self.spring.get_top_categories(
-                            period=period,
-                            payment_method=payment_method,
-                            account=account,
-                            transaction_id=transaction_id,
-                        ),
-                        AnalyticsCategoryBreakdownResponse,
-                    )
-                ],
-            )
-
-        if "account_breakdown" in plan:
-            self._populate_context_section(
-                context=context,
-                unavailable_tools=unavailable_tools,
-                tool_name="account_breakdown",
-                context_key="account_breakdown",
-                builder=lambda: [
-                    item.model_dump(mode="json")
-                    for item in normalize_list_response(
-                        self.spring.get_account_breakdown(
-                            period=period,
-                            payment_method=payment_method,
-                            transaction_id=transaction_id,
-                        ),
-                        AnalyticsAccountBreakdownResponse,
-                    )
-                ],
-            )
-
-        if "payment_methods" in plan:
-            self._populate_context_section(
-                context=context,
-                unavailable_tools=unavailable_tools,
-                tool_name="payment_methods",
-                context_key="payment_methods",
-                builder=lambda: [
-                    item.model_dump(mode="json")
-                    for item in normalize_list_response(
-                        self.spring.get_payment_method_breakdown(
-                            period=period,
-                            account=account,
-                            transaction_id=transaction_id,
-                        ),
-                        AnalyticsPaymentMethodBreakdownResponse,
-                    )
-                ],
-            )
-
-        if "daily" in plan:
-            self._populate_context_section(
-                context=context,
-                unavailable_tools=unavailable_tools,
-                tool_name="daily",
-                context_key="daily_totals",
-                builder=lambda: [
-                    item.model_dump(mode="json")
-                    for item in normalize_list_response(
-                        self.spring.get_daily_totals(
-                            period=period,
-                            payment_method=payment_method,
-                            account=account,
-                            transaction_id=transaction_id,
-                        ),
-                        AnalyticsDailyTotalResponse,
-                    )
-                ],
-            )
-
-        if "criticality" in plan:
-            self._populate_context_section(
-                context=context,
-                unavailable_tools=unavailable_tools,
-                tool_name="criticality",
-                context_key="criticality",
-                builder=lambda: [
-                    item.model_dump(mode="json")
-                    for item in normalize_list_response(
-                        self.spring.get_criticality_breakdown(
-                            period=period,
-                            payment_method=payment_method,
-                            account=account,
-                            transaction_id=transaction_id,
-                        ),
-                        AnalyticsCriticalityBreakdownResponse,
-                    )
-                ],
-            )
-
-        if "duplicates" in plan:
-            self._populate_context_section(
-                context=context,
-                unavailable_tools=unavailable_tools,
-                tool_name="duplicates",
-                context_key="duplicates",
-                builder=lambda: [
-                    item.model_dump(mode="json")
-                    for item in normalize_list_response(
-                        self.spring.get_duplicates(
-                            period=period,
-                            transaction_id=transaction_id,
-                        ),
-                        AnalyticsDuplicateResponse,
-                    )
-                ],
-            )
-
-        if "uncategorized" in plan:
-            self._populate_context_section(
-                context=context,
-                unavailable_tools=unavailable_tools,
-                tool_name="uncategorized",
-                context_key="uncategorized",
-                builder=lambda: [
-                    item.model_dump(mode="json")
-                    for item in normalize_list_response(
-                        self.spring.get_uncategorized(
-                            period=period,
-                            transaction_id=transaction_id,
-                        ),
-                        BudgetTransactionResponse,
-                    )
-                ],
-            )
-
-        if "outliers" in plan:
-            self._populate_context_section(
-                context=context,
-                unavailable_tools=unavailable_tools,
-                tool_name="outliers",
-                context_key="outliers",
-                builder=lambda: [
-                    item.model_dump(mode="json")
-                    for item in normalize_list_response(
-                        self.spring.get_outliers(
-                            period=period,
-                            transaction_id=transaction_id,
-                        ),
-                        BudgetTransactionResponse,
-                    )
-                ],
-            )
-
-        if unavailable_tools:
-            context["unavailable_tools"] = unavailable_tools
+        if unavailable_skills:
+            context["unavailable_tools"] = unavailable_skills
             context["degraded"] = True
 
         return context
@@ -593,58 +312,6 @@ class RAGService:
         target_year = today.year if target_month <= today.month else today.year - 1
         return self._format_statement_period(date(target_year, target_month, 1))
 
-    def _populate_context_section(
-        self,
-        context: dict[str, Any],
-        unavailable_tools: list[dict[str, Any]],
-        tool_name: str,
-        context_key: str,
-        builder: Callable[[], Any],
-        required: bool = False,
-    ) -> None:
-        try:
-            context[context_key] = builder()
-        except requests.RequestException as exc:
-            if required:
-                raise
-            unavailable_tools.append(self._serialize_tool_error(tool_name, exc))
-            logger.warning(
-                "Skipping unavailable RAG tool tool=%s context_key=%s error=%s",
-                tool_name,
-                context_key,
-                unavailable_tools[-1],
-            )
-        except ValueError as exc:
-            if required:
-                raise
-            unavailable_tools.append(
-                {
-                    "tool": tool_name,
-                    "error_type": type(exc).__name__,
-                    "detail": str(exc),
-                }
-            )
-            logger.warning(
-                "Skipping invalid RAG tool payload tool=%s context_key=%s detail=%s",
-                tool_name,
-                context_key,
-                exc,
-            )
-
-    @staticmethod
-    def _serialize_tool_error(tool_name: str, exc: requests.RequestException) -> dict[str, Any]:
-        error: dict[str, Any] = {
-            "tool": tool_name,
-            "error_type": type(exc).__name__,
-            "detail": str(exc),
-        }
-        response = getattr(exc, "response", None)
-        if response is not None:
-            error["status_code"] = response.status_code
-            response_text = response.text.strip()
-            if response_text:
-                error["response_body"] = response_text[:300]
-        return error
 
     def _fallback_answer(self, context: dict[str, Any]) -> str:
         fragments: list[str] = []

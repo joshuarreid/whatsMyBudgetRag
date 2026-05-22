@@ -9,7 +9,7 @@ from app.services.rag_service import RAGService
 
 class RAGServicePeriodResolutionTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.service = RAGService(Mock(), Mock(), Mock(), None)
+        self.service = RAGService(Mock(), Mock(), None)
 
     def test_explicit_request_period_wins(self) -> None:
         resolved_period, interpretation = self.service._resolve_period(

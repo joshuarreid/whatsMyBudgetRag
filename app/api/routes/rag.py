@@ -10,6 +10,7 @@ from app.services.analytics_service import AnalyticsService
 from app.services.insight_service import InsightService
 from app.services.llm_service import LLMService
 from app.services.rag_service import RAGService
+from app.skills.factories import build_skill_registry
 
 router = APIRouter()
 
@@ -19,8 +20,9 @@ def get_rag_service() -> RAGService:
     client = SpringBootClient()
     analytics = AnalyticsService(client)
     insights = InsightService(client, analytics)
+    skill_registry = build_skill_registry(client, analytics, insights)
     llm_service = LLMService()
-    return RAGService(client, analytics, insights, llm_service)
+    return RAGService(client, skill_registry, llm_service)
 
 
 @router.post("/ask", response_model=RagAnswerResponse)
