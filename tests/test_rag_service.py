@@ -76,9 +76,7 @@ class RAGServicePeriodResolutionTests(unittest.TestCase):
         self.assertEqual(timeline_context["statement_period_format"], "MonthYear")
         self.assertEqual(timeline_context["selection_source"], "question_bare_month")
 
-    def test_default_setting_is_used_when_question_has_no_time_reference(self) -> None:
-        self.service.default_period = "January2026"
-
+    def test_current_statement_period_is_used_when_question_has_no_time_reference(self) -> None:
         resolved_period, interpretation = self.service._resolve_period(
             question="What was my total spend?",
             period=None,
@@ -86,8 +84,9 @@ class RAGServicePeriodResolutionTests(unittest.TestCase):
             today=date(2026, 5, 22),
         )
 
-        self.assertEqual(resolved_period, "January2026")
-        self.assertEqual(interpretation["source"], "default_setting")
+        self.assertEqual(resolved_period, "May2026")
+        self.assertEqual(interpretation["source"], "current_statement_period_fallback")
+        self.service.spring.get_periods.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -54,7 +54,6 @@ LOG_LEVEL=INFO
 LOG_FORMAT=text
 OPENAI_API_KEY=
 OPENAI_CHAT_MODEL=gpt-4o-mini
-DEFAULT_ANALYTICS_PERIOD=2026-01
 INSIGHT_HIGH_SHARE_THRESHOLD=45
 INSIGHT_OUTLIER_AMOUNT_THRESHOLD=500
 ```
@@ -65,7 +64,7 @@ Notes:
 - `LOG_LEVEL` controls application and request logging verbosity.
 - `LOG_FORMAT` accepts `text` or `json` for human-readable or structured logs.
 - If `OPENAI_API_KEY` is unset, the `/rag/ask` endpoint still works and returns a deterministic summary from the fetched API context.
-- `DEFAULT_ANALYTICS_PERIOD` is an optional fallback. If it is unset, the RAG service asks Spring Boot for available periods and uses the latest one.
+- Questions without an explicit or inferred time reference now fall back to the current statement period, formatted as `MonthYear` (for example `May2026`).
 - `INSIGHT_HIGH_SHARE_THRESHOLD` controls when concentration warnings are emitted.
 - `INSIGHT_OUTLIER_AMOUNT_THRESHOLD` controls the amount threshold for derived outlier flags.
 

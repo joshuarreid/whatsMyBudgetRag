@@ -15,6 +15,32 @@ class SkillRegistry:
         self.skills = skills
         self._skills_by_id = {skill.skill_id: skill for skill in skills}
 
+    def available_skills(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "skill_id": skill.skill_id,
+                "category": skill.category,
+                "context_key": skill.context_key,
+                "description": skill.definition.description,
+                "keywords": list(skill.definition.keywords),
+                "required": skill.required,
+            }
+            for skill in self.skills
+        ]
+
+    def resolve(self, skill_ids: list[str]) -> list[Skill]:
+        resolved: list[Skill] = []
+        seen_skill_ids: set[str] = set()
+        for skill_id in skill_ids:
+            if skill_id in seen_skill_ids:
+                continue
+            skill = self._skills_by_id.get(skill_id)
+            if skill is None:
+                continue
+            resolved.append(skill)
+            seen_skill_ids.add(skill_id)
+        return resolved
+
     def select(self, question: str) -> list[Skill]:
         selected_skills = [skill for skill in self.skills if skill.matches(question)]
         if selected_skills:

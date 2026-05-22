@@ -20,6 +20,7 @@ from app.models.schemas import (
     InsightPeriodSummaryResponse,
     RagAnswerResponse,
     RagAskRequest,
+    RagToolSelectionResponse,
 )
 
 __all__ = [
@@ -44,4 +45,5 @@ __all__ = [
     "InsightPeriodSummaryResponse",
     "RagAnswerResponse",
     "RagAskRequest",
+    "RagToolSelectionResponse",
 ]

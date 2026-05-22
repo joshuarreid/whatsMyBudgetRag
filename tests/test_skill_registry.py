@@ -6,6 +6,7 @@ from unittest.mock import Mock
 
 import requests
 
+from app.models.schemas import RagIntentResponse
 from app.services.rag_service import RAGService
 from app.skills.base import Skill, SkillDefinition, SkillRequest, SkillResult
 from app.skills.registry import SkillRegistry
@@ -64,6 +65,20 @@ class SkillRegistryTests(unittest.TestCase):
         selected = registry.select("Tell me something unexpected")
 
         self.assertEqual([skill.skill_id for skill in selected], ["overview"])
+
+    def test_available_skills_and_resolve_use_registered_skills_only(self) -> None:
+        registry = SkillRegistry(
+            [
+                StubSkill(skill_id="overview", context_key="overview", keywords=("spend",), payload={}),
+                StubSkill(skill_id="averages", context_key="averages", keywords=("average",), payload={}),
+            ]
+        )
+
+        available_skills = registry.available_skills()
+        resolved = registry.resolve(["averages", "unknown", "averages", "overview"])
+
+        self.assertEqual([item["skill_id"] for item in available_skills], ["overview", "averages"])
+        self.assertEqual([skill.skill_id for skill in resolved], ["averages", "overview"])
 
     def test_execute_collects_optional_errors_without_failing(self) -> None:
         response = Mock(status_code=503, text="service unavailable")
@@ -134,9 +149,86 @@ class RAGServiceSkillIntegrationTests(unittest.TestCase):
         )
 
         self.assertEqual(response.plan, ["overview", "averages"])
+        self.assertEqual(response.tool_selection.llm_suggested_tools, [])
+        self.assertEqual(response.tool_selection.deterministic_tools, ["overview", "averages"])
+        self.assertEqual(response.tool_selection.union_tools, ["overview", "averages"])
         self.assertEqual(response.context["skills"]["selected"], ["overview", "averages"])
         self.assertEqual(response.context["overview"]["total_amount"], "100.00")
         self.assertEqual(response.context["averages"]["average_transaction_amount"], "25.00")
+
+    def test_answer_prefers_llm_intent_when_it_resolves_to_registered_skills(self) -> None:
+        registry = SkillRegistry(
+            [
+                StubSkill(
+                    skill_id="overview",
+                    context_key="overview",
+                    keywords=("spend",),
+                    payload={"total_amount": "100.00", "transaction_count": 4},
+                    required=True,
+                ),
+                StubSkill(
+                    skill_id="averages",
+                    context_key="averages",
+                    keywords=("average",),
+                    payload={"average_transaction_amount": "25.00"},
+                ),
+            ]
+        )
+        llm = Mock()
+        llm.classify_intent.return_value = RagIntentResponse(
+            skill_ids=["averages"],
+            time_reference="this month",
+            confidence=0.92,
+        )
+        llm.generate_answer.return_value = None
+        service = RAGService(Mock(), registry, llm)
+
+        response = service.answer(
+            question="Give me the gist of this month",
+            period="May2026",
+        )
+
+        self.assertEqual(response.plan, ["averages"])
+        self.assertEqual(response.tool_selection.llm_suggested_tools, ["averages"])
+        self.assertEqual(response.tool_selection.deterministic_tools, ["overview"])
+        self.assertEqual(response.tool_selection.union_tools, ["averages", "overview"])
+        self.assertEqual(response.context["routing"]["source"], "llm_intent")
+        self.assertEqual(response.context["routing"]["llm_intent"]["skill_ids"], ["averages"])
+
+    def test_answer_falls_back_to_keyword_selection_when_llm_intent_is_invalid(self) -> None:
+        registry = SkillRegistry(
+            [
+                StubSkill(
+                    skill_id="overview",
+                    context_key="overview",
+                    keywords=("spend",),
+                    payload={"total_amount": "100.00", "transaction_count": 4},
+                    required=True,
+                ),
+                StubSkill(
+                    skill_id="averages",
+                    context_key="averages",
+                    keywords=("average",),
+                    payload={"average_transaction_amount": "25.00"},
+                ),
+            ]
+        )
+        llm = Mock()
+        llm.classify_intent.return_value = RagIntentResponse(skill_ids=["does_not_exist"], confidence=0.6)
+        llm.generate_answer.return_value = None
+        service = RAGService(Mock(), registry, llm)
+
+        response = service.answer(
+            question="What was my average spend this month?",
+            period="May2026",
+        )
+
+        self.assertEqual(response.plan, ["overview", "averages"])
+        self.assertEqual(response.tool_selection.llm_suggested_tools, [])
+        self.assertEqual(response.tool_selection.deterministic_tools, ["overview", "averages"])
+        self.assertEqual(response.tool_selection.union_tools, ["overview", "averages"])
+        self.assertEqual(response.context["routing"]["source"], "keyword_fallback")
+        self.assertEqual(response.context["routing"]["resolved_skill_ids"], ["overview", "averages"])
 
 
 if __name__ == "__main__":

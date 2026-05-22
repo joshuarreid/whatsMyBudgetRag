@@ -14,7 +14,6 @@ class Settings:
     log_format: str
     openai_api_key: Optional[str]
     openai_chat_model: str
-    default_analytics_period: Optional[str]
     insight_high_share_threshold: float
     insight_outlier_amount_threshold: float
 
@@ -28,7 +27,6 @@ def get_settings() -> Settings:
         log_format=os.getenv("LOG_FORMAT", "text").lower(),
         openai_api_key=os.getenv("OPENAI_API_KEY") or None,
         openai_chat_model=os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini"),
-        default_analytics_period=os.getenv("DEFAULT_ANALYTICS_PERIOD") or None,
         insight_high_share_threshold=float(os.getenv("INSIGHT_HIGH_SHARE_THRESHOLD", "45")),
         insight_outlier_amount_threshold=float(
             os.getenv("INSIGHT_OUTLIER_AMOUNT_THRESHOLD", "500")

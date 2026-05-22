@@ -6,10 +6,8 @@ from datetime import date
 from typing import Any, Optional
 
 from app.clients.spring_boot_client import SpringBootClient
-from app.core.config import get_settings
-from app.models.schemas import RagAnswerResponse
-from app.services.normalizers import normalize_periods_response
-from app.skills.base import SkillRequest
+from app.models.schemas import RagAnswerResponse, RagIntentResponse
+from app.skills.base import Skill, SkillRequest
 from app.skills.registry import SkillRegistry
 
 logger = logging.getLogger(__name__)
@@ -58,8 +56,6 @@ class RAGService:
         self.spring = spring_client
         self.skill_registry = skill_registry
         self.llm = llm_service
-        settings = get_settings()
-        self.default_period = settings.default_analytics_period
 
     def answer(
         self,
@@ -83,13 +79,14 @@ class RAGService:
                 period=period,
                 transaction_id=transaction_id,
             )
-            selected_skills = self.skill_registry.select(question)
+            selected_skills, routing_metadata = self._select_skills(question)
             plan = [skill.skill_id for skill in selected_skills]
             logger.info(
-                "RAG execution plan selected period=%s plan=%s period_source=%s",
+                "RAG execution plan selected period=%s plan=%s period_source=%s routing_source=%s",
                 selected_period,
                 plan,
                 period_interpretation.get("source", "unknown"),
+                routing_metadata.get("source", "unknown"),
             )
             skill_request = SkillRequest(
                 question=question,
@@ -103,6 +100,7 @@ class RAGService:
                 plan=plan,
                 period_interpretation=period_interpretation,
                 skills=selected_skills,
+                routing_metadata=routing_metadata,
             )
             llm_answer = self.llm.generate_answer(question, context) if self.llm else None
             answer = llm_answer or self._fallback_answer(context)
@@ -116,6 +114,7 @@ class RAGService:
                 question=question,
                 period=selected_period,
                 plan=plan,
+                tool_selection=routing_metadata.get("tool_selection", {}),
                 context=context,
                 answer=answer,
             )
@@ -154,24 +153,13 @@ class RAGService:
             )
             return inferred_period["resolved_period"], inferred_period
 
-        if self.default_period:
-            logger.debug("Using default analytics period=%s", self.default_period)
-            return self.default_period, {
-                "source": "default_setting",
-                "matched_text": self.default_period,
-                "resolved_period": self.default_period,
-            }
-
-        payload = self.spring.get_periods(transaction_id=transaction_id)
-        periods_response = normalize_periods_response(payload)
-        if not periods_response.periods:
-            raise ValueError("No analytics periods were returned by Spring Boot")
-        resolved_period = sorted(periods_response.periods)[-1]
-        logger.debug("Resolved latest analytics period=%s", resolved_period)
+        resolved_period = self._format_statement_period(reference_date)
+        logger.debug("Falling back to current statement period=%s", resolved_period)
         return resolved_period, {
-            "source": "latest_available_period",
+            "source": "current_statement_period_fallback",
             "matched_text": resolved_period,
             "resolved_period": resolved_period,
+            "resolution_rule": "questions without a time reference fall back to the current statement period",
         }
 
     def _infer_period_from_question(self, question: str, today: date) -> Optional[dict[str, str]]:
@@ -236,7 +224,8 @@ class RAGService:
         skill_request: SkillRequest,
         plan: list[str],
         period_interpretation: dict[str, str],
-        skills: list[Any],
+        skills: list[Skill],
+        routing_metadata: dict[str, Any],
     ) -> dict[str, Any]:
         timeline_context = self._build_timeline_context(
             period=skill_request.period,
@@ -255,6 +244,7 @@ class RAGService:
                 "selected": plan,
                 "count": len(plan),
             },
+            "routing": routing_metadata,
         }
         skill_context, unavailable_skills = self.skill_registry.execute(skills, skill_request)
         context.update(skill_context)
@@ -264,6 +254,61 @@ class RAGService:
             context["degraded"] = True
 
         return context
+
+    def _select_skills(self, question: str) -> tuple[list[Skill], dict[str, Any]]:
+        llm_intent = self._classify_intent(question)
+        llm_selected_skills = self.skill_registry.resolve(llm_intent.skill_ids) if llm_intent is not None else []
+        deterministic_skills = self.skill_registry.select(question)
+        tool_selection = {
+            "llm_suggested_tools": [skill.skill_id for skill in llm_selected_skills],
+            "deterministic_tools": [skill.skill_id for skill in deterministic_skills],
+            "union_tools": self._union_skill_ids(llm_selected_skills, deterministic_skills),
+        }
+
+        if llm_intent is not None:
+            if llm_selected_skills:
+                return llm_selected_skills, {
+                    "source": "llm_intent",
+                    "llm_intent": llm_intent.model_dump(mode="json", exclude_none=True),
+                    "resolved_skill_ids": [skill.skill_id for skill in llm_selected_skills],
+                    "llm_raw_suggested_tools": llm_intent.skill_ids,
+                    "tool_selection": tool_selection,
+                }
+
+        return deterministic_skills, {
+            "source": "keyword_match" if llm_intent is None else "keyword_fallback",
+            "llm_intent": (
+                llm_intent.model_dump(mode="json", exclude_none=True) if llm_intent is not None else None
+            ),
+            "resolved_skill_ids": [skill.skill_id for skill in deterministic_skills],
+            "llm_raw_suggested_tools": llm_intent.skill_ids if llm_intent is not None else [],
+            "tool_selection": tool_selection,
+        }
+
+    def _classify_intent(self, question: str) -> Optional[RagIntentResponse]:
+        if self.llm is None or not hasattr(self.llm, "classify_intent"):
+            return None
+
+        try:
+            return self.llm.classify_intent(
+                question=question,
+                available_skills=self.skill_registry.available_skills(),
+            )
+        except Exception:
+            logger.exception("Intent classification raised unexpectedly; continuing with deterministic routing")
+            return None
+
+    @staticmethod
+    def _union_skill_ids(*skill_groups: list[Skill]) -> list[str]:
+        union_skill_ids: list[str] = []
+        seen_skill_ids: set[str] = set()
+        for skill_group in skill_groups:
+            for skill in skill_group:
+                if skill.skill_id in seen_skill_ids:
+                    continue
+                union_skill_ids.append(skill.skill_id)
+                seen_skill_ids.add(skill.skill_id)
+        return union_skill_ids
 
     def _build_timeline_context(
         self,

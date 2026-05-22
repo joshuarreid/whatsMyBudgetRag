@@ -19,6 +19,25 @@ class RagAskRequest(AnalyticsBaseModel):
     transaction_id: Optional[str] = None
 
 
+class RagIntentFilters(AnalyticsBaseModel):
+    payment_method: Optional[str] = None
+    account: Optional[str] = None
+
+
+class RagIntentResponse(AnalyticsBaseModel):
+    skill_ids: list[str] = Field(default_factory=list)
+    time_reference: Optional[str] = None
+    filters: RagIntentFilters = Field(default_factory=RagIntentFilters)
+    confidence: Optional[float] = Field(default=None, ge=0, le=1)
+    rationale: Optional[str] = None
+
+
+class RagToolSelectionResponse(AnalyticsBaseModel):
+    llm_suggested_tools: list[str] = Field(default_factory=list)
+    deterministic_tools: list[str] = Field(default_factory=list)
+    union_tools: list[str] = Field(default_factory=list)
+
+
 class AnalyticsPeriodsResponse(AnalyticsBaseModel):
     periods: list[str] = Field(default_factory=list)
     count: int
@@ -168,5 +187,6 @@ class RagAnswerResponse(AnalyticsBaseModel):
     question: str
     period: str
     plan: list[str] = Field(default_factory=list)
+    tool_selection: RagToolSelectionResponse = Field(default_factory=RagToolSelectionResponse)
     context: dict[str, Any] = Field(default_factory=dict)
     answer: str
