@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+import logging
+from typing import Any, Optional
 
 from openai import OpenAI
 
 from app.core.config import get_settings
+
+
+logger = logging.getLogger(__name__)
 
 
 class LLMService:
@@ -15,9 +19,15 @@ class LLMService:
         settings = get_settings()
         self.model = settings.openai_chat_model
         self.client = OpenAI(api_key=settings.openai_api_key) if settings.openai_api_key else None
+        logger.info(
+            "Initialized LLMService model=%s enabled=%s",
+            self.model,
+            self.client is not None,
+        )
 
-    def generate_answer(self, question: str, context: dict[str, Any]) -> str | None:
+    def generate_answer(self, question: str, context: dict[str, Any]) -> Optional[str]:
         if self.client is None:
+            logger.debug("Skipping LLM generation because no OpenAI client is configured")
             return None
 
         prompt = (
@@ -26,5 +36,12 @@ class LLMService:
             f"Question:\n{question}\n\n"
             f"Context:\n{json.dumps(context, default=str, indent=2)}"
         )
+        logger.info(
+            "Submitting LLM response request model=%s context_keys=%s question_length=%s",
+            self.model,
+            sorted(context.keys()),
+            len(question),
+        )
         response = self.client.responses.create(model=self.model, input=prompt)
+        logger.info("LLM response received model=%s output_length=%s", self.model, len(response.output_text))
         return response.output_text.strip()

@@ -1,0 +1,22 @@
+meta {
+  name: 09 Average Transaction Amount
+  type: http
+  seq: 9
+}
+
+post {
+  url: {{baseUrl}}/rag/ask
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "question": "What is my average transaction amount this period?",
+    "period": "{{period}}"
+  }
+}

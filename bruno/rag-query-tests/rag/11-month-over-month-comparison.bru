@@ -1,0 +1,22 @@
+meta {
+  name: 11 Month Over Month Comparison
+  type: http
+  seq: 11
+}
+
+post {
+  url: {{baseUrl}}/rag/ask
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "question": "Compare this period versus last month.",
+    "period": "{{period}}"
+  }
+}

@@ -1,0 +1,22 @@
+meta {
+  name: 19 Outliers
+  type: http
+  seq: 19
+}
+
+post {
+  url: {{baseUrl}}/rag/ask
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "question": "What were the largest outlier transactions this period?",
+    "period": "{{period}}"
+  }
+}

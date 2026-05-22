@@ -1,0 +1,22 @@
+meta {
+  name: 04 Top Categories
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{baseUrl}}/rag/ask
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "question": "Show the top categories for this period.",
+    "period": "{{period}}"
+  }
+}

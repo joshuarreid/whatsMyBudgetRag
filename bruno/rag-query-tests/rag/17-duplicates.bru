@@ -1,0 +1,22 @@
+meta {
+  name: 17 Duplicates
+  type: http
+  seq: 17
+}
+
+post {
+  url: {{baseUrl}}/rag/ask
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "question": "Do I have any duplicate transactions this period?",
+    "period": "{{period}}"
+  }
+}

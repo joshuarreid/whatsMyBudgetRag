@@ -1,3 +1,3 @@
-from app.api.routes import analytics, rag
+from app.api.routes import analytics, insights, rag
 
-__all__ = ["analytics", "rag"]
+__all__ = ["analytics", "insights", "rag"]

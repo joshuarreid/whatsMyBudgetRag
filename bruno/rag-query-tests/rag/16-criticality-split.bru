@@ -1,0 +1,22 @@
+meta {
+  name: 16 Criticality Split
+  type: http
+  seq: 16
+}
+
+post {
+  url: {{baseUrl}}/rag/ask
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "question": "How much of my spending was essential versus non-essential?",
+    "period": "{{period}}"
+  }
+}

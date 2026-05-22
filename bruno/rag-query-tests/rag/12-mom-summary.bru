@@ -1,0 +1,22 @@
+meta {
+  name: 12 MoM Summary
+  type: http
+  seq: 12
+}
+
+post {
+  url: {{baseUrl}}/rag/ask
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "question": "Give me a month over month summary for this period.",
+    "period": "{{period}}"
+  }
+}

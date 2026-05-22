@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends
 from app.clients.spring_boot_client import SpringBootClient
 from app.models.schemas import RagAskRequest, RagAnswerResponse
 from app.services.analytics_service import AnalyticsService
+from app.services.insight_service import InsightService
 from app.services.llm_service import LLMService
 from app.services.rag_service import RAGService
 
@@ -17,8 +18,9 @@ router = APIRouter()
 def get_rag_service() -> RAGService:
     client = SpringBootClient()
     analytics = AnalyticsService(client)
+    insights = InsightService(client, analytics)
     llm_service = LLMService()
-    return RAGService(client, analytics, llm_service)
+    return RAGService(client, analytics, insights, llm_service)
 
 
 @router.post("/ask", response_model=RagAnswerResponse)

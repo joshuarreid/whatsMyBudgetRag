@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
-from typing import Any
+from typing import Any, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -13,10 +13,10 @@ class AnalyticsBaseModel(BaseModel):
 
 class RagAskRequest(AnalyticsBaseModel):
     question: str = Field(min_length=1)
-    period: str | None = None
-    payment_method: str | None = None
-    account: str | None = None
-    transaction_id: str | None = None
+    period: Optional[str] = None
+    payment_method: Optional[str] = None
+    account: Optional[str] = None
+    transaction_id: Optional[str] = None
 
 
 class AnalyticsPeriodsResponse(AnalyticsBaseModel):
@@ -26,8 +26,8 @@ class AnalyticsPeriodsResponse(AnalyticsBaseModel):
 
 class AnalyticsPeriodOverviewResponse(AnalyticsBaseModel):
     statement_period: str = Field(alias="statementPeriod")
-    payment_method: str | None = Field(default=None, alias="paymentMethod")
-    account: str | None = None
+    payment_method: Optional[str] = Field(default=None, alias="paymentMethod")
+    account: Optional[str] = None
     total_amount: Decimal = Field(alias="totalAmount")
     transaction_count: int = Field(alias="transactionCount")
 
@@ -69,18 +69,99 @@ class AnalyticsDuplicateResponse(AnalyticsBaseModel):
 
 
 class BudgetTransactionResponse(AnalyticsBaseModel):
-    id: int | None = None
+    id: Optional[int] = None
     name: str
     amount: Decimal
     category: str
     criticality: str
     transaction_date: date = Field(alias="transactionDate")
     account: str
-    status: str | None = None
-    created_time: str | None = Field(default=None, alias="createdTime")
+    status: Optional[str] = None
+    created_time: Optional[str] = Field(default=None, alias="createdTime")
     payment_method: str = Field(alias="paymentMethod")
     statement_period: str = Field(alias="statementPeriod")
-    row_hash: str | None = Field(default=None, alias="rowHash")
+    row_hash: Optional[str] = Field(default=None, alias="rowHash")
+
+
+class InsightMetric(AnalyticsBaseModel):
+    label: str
+    value: Union[Decimal, int, str]
+    direction: Optional[str] = None
+    summary: Optional[str] = None
+
+
+class InsightComparisonMetric(AnalyticsBaseModel):
+    label: str
+    current_value: Union[Decimal, int, str] = Field(alias="currentValue")
+    previous_value: Union[Decimal, int, str] = Field(alias="previousValue")
+    absolute_change: Union[Decimal, int, str] = Field(alias="absoluteChange")
+    percent_change: Optional[Decimal] = Field(default=None, alias="percentChange")
+    direction: str
+    summary: str
+
+
+class InsightFlag(AnalyticsBaseModel):
+    kind: str
+    severity: str
+    title: str
+    summary: str
+    related_value: Optional[Union[Decimal, int, str]] = None
+
+
+class InsightCategorySummary(AnalyticsBaseModel):
+    category: str
+    total_amount: Decimal
+    transaction_count: int
+    share_of_spend: Decimal
+
+
+class InsightAccountSummary(AnalyticsBaseModel):
+    account: str
+    total_amount: Decimal
+    transaction_count: int
+    share_of_spend: Decimal
+
+
+class InsightPaymentMethodSummary(AnalyticsBaseModel):
+    payment_method: str
+    total_amount: Decimal
+    transaction_count: int
+    share_of_spend: Decimal
+
+
+class InsightPeriodSummaryResponse(AnalyticsBaseModel):
+    period: str
+    overview: AnalyticsPeriodOverviewResponse
+    top_categories: list[InsightCategorySummary] = Field(default_factory=list)
+    top_accounts: list[InsightAccountSummary] = Field(default_factory=list)
+    top_payment_methods: list[InsightPaymentMethodSummary] = Field(default_factory=list)
+    metrics: list[InsightMetric] = Field(default_factory=list)
+    flags: list[InsightFlag] = Field(default_factory=list)
+
+
+class InsightBehaviorSummaryResponse(AnalyticsBaseModel):
+    period: str
+    behavior_summary: list[str] = Field(default_factory=list)
+    metrics: list[InsightMetric] = Field(default_factory=list)
+    flags: list[InsightFlag] = Field(default_factory=list)
+
+
+class InsightAveragesResponse(AnalyticsBaseModel):
+    period: str
+    active_days: int = Field(alias="activeDays")
+    total_spend: Decimal = Field(alias="totalSpend")
+    transaction_count: int = Field(alias="transactionCount")
+    average_transaction_amount: Decimal = Field(alias="averageTransactionAmount")
+    average_daily_spend: Decimal = Field(alias="averageDailySpend")
+    average_daily_transaction_count: Decimal = Field(alias="averageDailyTransactionCount")
+    metrics: list[InsightMetric] = Field(default_factory=list)
+
+
+class InsightMonthOverMonthResponse(AnalyticsBaseModel):
+    period: str
+    previous_period: Optional[str] = Field(default=None, alias="previousPeriod")
+    metrics: list[InsightComparisonMetric] = Field(default_factory=list)
+    highlights: list[str] = Field(default_factory=list)
 
 
 class RagAnswerResponse(AnalyticsBaseModel):

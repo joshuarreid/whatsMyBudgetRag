@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, Query
 
@@ -17,7 +18,7 @@ from app.models.schemas import (
     BudgetTransactionResponse,
 )
 from app.services.analytics_service import AnalyticsService
-from app.services.rag_service import normalize_list_response, normalize_periods_response
+from app.services.normalizers import normalize_list_response, normalize_periods_response
 
 router = APIRouter()
 
@@ -35,7 +36,7 @@ def get_analytics_service(
 
 @router.get("/periods", response_model=AnalyticsPeriodsResponse)
 def periods(
-    transaction_id: str | None = Header(default=None, alias="X-Transaction-ID"),
+    transaction_id: Optional[str] = Header(default=None, alias="X-Transaction-ID"),
 ) -> AnalyticsPeriodsResponse:
     payload = get_spring_boot_client().get_periods(transaction_id=transaction_id)
     return normalize_periods_response(payload)
@@ -44,9 +45,9 @@ def periods(
 @router.get("/periods/{period}/overview", response_model=AnalyticsPeriodOverviewResponse)
 def period_overview(
     period: str,
-    payment_method: str | None = Query(default=None),
-    account: str | None = Query(default=None),
-    transaction_id: str | None = Header(default=None, alias="X-Transaction-ID"),
+    payment_method: Optional[str] = Query(default=None),
+    account: Optional[str] = Query(default=None),
+    transaction_id: Optional[str] = Header(default=None, alias="X-Transaction-ID"),
     service: AnalyticsService = Depends(get_analytics_service),
 ) -> AnalyticsPeriodOverviewResponse:
     return service.period_overview(
@@ -60,9 +61,9 @@ def period_overview(
 @router.get("/periods/{period}/categories", response_model=list[AnalyticsCategoryBreakdownResponse])
 def category_breakdown(
     period: str,
-    payment_method: str | None = Query(default=None),
-    account: str | None = Query(default=None),
-    transaction_id: str | None = Header(default=None, alias="X-Transaction-ID"),
+    payment_method: Optional[str] = Query(default=None),
+    account: Optional[str] = Query(default=None),
+    transaction_id: Optional[str] = Header(default=None, alias="X-Transaction-ID"),
     client: SpringBootClient = Depends(get_spring_boot_client),
 ) -> list[AnalyticsCategoryBreakdownResponse]:
     payload = client.get_category_breakdown(
@@ -78,9 +79,9 @@ def category_breakdown(
 def top_categories(
     period: str,
     limit: int = Query(default=10, ge=0, le=100),
-    payment_method: str | None = Query(default=None),
-    account: str | None = Query(default=None),
-    transaction_id: str | None = Header(default=None, alias="X-Transaction-ID"),
+    payment_method: Optional[str] = Query(default=None),
+    account: Optional[str] = Query(default=None),
+    transaction_id: Optional[str] = Header(default=None, alias="X-Transaction-ID"),
     client: SpringBootClient = Depends(get_spring_boot_client),
 ) -> list[AnalyticsCategoryBreakdownResponse]:
     payload = client.get_top_categories(
@@ -96,8 +97,8 @@ def top_categories(
 @router.get("/periods/{period}/accounts", response_model=list[AnalyticsAccountBreakdownResponse])
 def account_breakdown(
     period: str,
-    payment_method: str | None = Query(default=None),
-    transaction_id: str | None = Header(default=None, alias="X-Transaction-ID"),
+    payment_method: Optional[str] = Query(default=None),
+    transaction_id: Optional[str] = Header(default=None, alias="X-Transaction-ID"),
     client: SpringBootClient = Depends(get_spring_boot_client),
 ) -> list[AnalyticsAccountBreakdownResponse]:
     payload = client.get_account_breakdown(
@@ -111,8 +112,8 @@ def account_breakdown(
 @router.get("/periods/{period}/payment-methods", response_model=list[AnalyticsPaymentMethodBreakdownResponse])
 def payment_method_breakdown(
     period: str,
-    account: str | None = Query(default=None),
-    transaction_id: str | None = Header(default=None, alias="X-Transaction-ID"),
+    account: Optional[str] = Query(default=None),
+    transaction_id: Optional[str] = Header(default=None, alias="X-Transaction-ID"),
     client: SpringBootClient = Depends(get_spring_boot_client),
 ) -> list[AnalyticsPaymentMethodBreakdownResponse]:
     payload = client.get_payment_method_breakdown(
@@ -126,9 +127,9 @@ def payment_method_breakdown(
 @router.get("/periods/{period}/daily", response_model=list[AnalyticsDailyTotalResponse])
 def daily_totals(
     period: str,
-    payment_method: str | None = Query(default=None),
-    account: str | None = Query(default=None),
-    transaction_id: str | None = Header(default=None, alias="X-Transaction-ID"),
+    payment_method: Optional[str] = Query(default=None),
+    account: Optional[str] = Query(default=None),
+    transaction_id: Optional[str] = Header(default=None, alias="X-Transaction-ID"),
     client: SpringBootClient = Depends(get_spring_boot_client),
 ) -> list[AnalyticsDailyTotalResponse]:
     payload = client.get_daily_totals(
@@ -143,9 +144,9 @@ def daily_totals(
 @router.get("/periods/{period}/criticality", response_model=list[AnalyticsCriticalityBreakdownResponse])
 def criticality_breakdown(
     period: str,
-    payment_method: str | None = Query(default=None),
-    account: str | None = Query(default=None),
-    transaction_id: str | None = Header(default=None, alias="X-Transaction-ID"),
+    payment_method: Optional[str] = Query(default=None),
+    account: Optional[str] = Query(default=None),
+    transaction_id: Optional[str] = Header(default=None, alias="X-Transaction-ID"),
     client: SpringBootClient = Depends(get_spring_boot_client),
 ) -> list[AnalyticsCriticalityBreakdownResponse]:
     payload = client.get_criticality_breakdown(
@@ -160,7 +161,7 @@ def criticality_breakdown(
 @router.get("/periods/{period}/duplicates", response_model=list[AnalyticsDuplicateResponse])
 def duplicates(
     period: str,
-    transaction_id: str | None = Header(default=None, alias="X-Transaction-ID"),
+    transaction_id: Optional[str] = Header(default=None, alias="X-Transaction-ID"),
     client: SpringBootClient = Depends(get_spring_boot_client),
 ) -> list[AnalyticsDuplicateResponse]:
     payload = client.get_duplicates(period=period, transaction_id=transaction_id)
@@ -170,7 +171,7 @@ def duplicates(
 @router.get("/periods/{period}/uncategorized", response_model=list[BudgetTransactionResponse])
 def uncategorized(
     period: str,
-    transaction_id: str | None = Header(default=None, alias="X-Transaction-ID"),
+    transaction_id: Optional[str] = Header(default=None, alias="X-Transaction-ID"),
     client: SpringBootClient = Depends(get_spring_boot_client),
 ) -> list[BudgetTransactionResponse]:
     payload = client.get_uncategorized(period=period, transaction_id=transaction_id)
@@ -181,7 +182,7 @@ def uncategorized(
 def outliers(
     period: str,
     limit: int = Query(default=20, ge=0, le=200),
-    transaction_id: str | None = Header(default=None, alias="X-Transaction-ID"),
+    transaction_id: Optional[str] = Header(default=None, alias="X-Transaction-ID"),
     client: SpringBootClient = Depends(get_spring_boot_client),
 ) -> list[BudgetTransactionResponse]:
     payload = client.get_outliers(period=period, limit=limit, transaction_id=transaction_id)

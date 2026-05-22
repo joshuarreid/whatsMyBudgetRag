@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Optional
+
 from app.clients.spring_boot_client import SpringBootClient
 from app.models.schemas import AnalyticsPeriodOverviewResponse
 
@@ -13,9 +15,9 @@ class AnalyticsService:
     def period_overview(
         self,
         period: str,
-        payment_method: str | None = None,
-        account: str | None = None,
-        transaction_id: str | None = None,
+        payment_method: Optional[str] = None,
+        account: Optional[str] = None,
+        transaction_id: Optional[str] = None,
     ) -> AnalyticsPeriodOverviewResponse:
         payload = self.client.get_period_overview(
             period=period,
