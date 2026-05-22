@@ -1,145 +1,164 @@
-# FastAPI RAG Template
+# Finance Intelligence API
 
-A reusable FastAPI starter for retrieval-augmented generation with DigitalOcean Managed PostgreSQL (pgvector), OpenAI, and sentence-transformers.
+This service is a thin FastAPI orchestration layer on top of Spring Boot. Spring Boot remains the system of record for transactions and analytics. FastAPI handles request shaping, lightweight aggregation, and optional LLM-based explanation.
 
-## Features
+## Architecture
 
-- FastAPI service with `/health`, `/ingest`, `/documents/{doc_id}`, and `/rag` endpoints
-- Environment-based configuration for DigitalOcean Managed PostgreSQL with pgvector
-- Embeddings via sentence-transformers or OpenAI
-- Automatic pgvector extension, table, and index creation on startup
-- Dockerfile ready for DigitalOcean App Platform
+- No vector database
+- No embeddings
+- No duplicated analytics SQL
+- Spring Boot owns transaction and analytics endpoints
+- FastAPI owns orchestration and natural-language answer generation
 
 ## Project Structure
 
 ```text
 .
 ├── app/
-│   ├── __init__.py
+│   ├── api/
+│   │   └── routes/
+│   │       ├── analytics.py
+│   │       └── rag.py
+│   ├── clients/
+│   │   └── spring_boot_client.py
+│   ├── core/
+│   │   └── config.py
+│   ├── models/
+│   │   └── schemas.py
+│   ├── services/
+│   │   ├── analytics_service.py
+│   │   ├── llm_service.py
+│   │   └── rag_service.py
 │   ├── db_client.py
 │   ├── ingest.py
 │   ├── main.py
 │   └── rag.py
-├── .env.example
-├── .gitignore
 ├── Dockerfile
 ├── README.md
 └── requirements.txt
 ```
 
+The legacy modules remain only as compatibility shims while the app runs through the layered modules above.
+
 ## Configuration
 
-Copy `.env.example` to `.env` and set the values for your environment.
+Set these environment variables for local development or deployment:
 
 ```env
-DATABASE_URL=postgresql://username:password@your-do-postgres-host:25060/database?sslmode=require
-# Alternative to DATABASE_URL:
-# PGHOST=your-do-postgres-host
-# PGPORT=25060
-# PGDATABASE=database
-# PGUSER=username
-# PGPASSWORD=password
-# PGSSLMODE=require
-VECTOR_TABLE_NAME=documents
-EMBEDDINGS_PROVIDER=sentence_transformers
-EMBEDDINGS_MODEL=all-MiniLM-L6-v2
+SPRING_BOOT_BASE_URL=http://springboot-api
+HTTP_TIMEOUT_SECONDS=10
 OPENAI_API_KEY=
 OPENAI_CHAT_MODEL=gpt-4o-mini
-OPENAI_EMBEDDING_MODEL=text-embedding-3-small
-VECTOR_SIZE=384
-VECTOR_DISTANCE=cosine
-DB_MAX_POOL_SIZE=5
-RAG_TOP_K=3
+DEFAULT_ANALYTICS_PERIOD=2026-01
 ```
 
 Notes:
 
-- Use `EMBEDDINGS_PROVIDER=openai` to generate embeddings with OpenAI instead of sentence-transformers.
-- `VECTOR_TABLE_NAME` may be either a plain table name like `documents` or a schema-qualified name like `appdata.documents`.
-- For `sentence_transformers`, keep `VECTOR_SIZE` aligned with the model dimension. `all-MiniLM-L6-v2` uses `384`.
-- For `openai`, `text-embedding-3-small` uses `1536` and `text-embedding-3-large` uses `3072`.
-- `VECTOR_DISTANCE=cosine` is the safest default for semantic search. `dot`, `euclid`, and `manhattan` are also supported.
-- DigitalOcean Managed PostgreSQL requires TLS, so include `sslmode=require` in `DATABASE_URL` or set `PGSSLMODE=require`.
+- `SPRING_BOOT_BASE_URL` should point at the Spring Boot service.
+- If `OPENAI_API_KEY` is unset, the `/rag/ask` endpoint still works and returns a deterministic summary from the fetched API context.
+- `DEFAULT_ANALYTICS_PERIOD` is an optional fallback. If it is unset, the RAG service asks Spring Boot for available periods and uses the latest one.
 
 ## Local Development
-
-1. Create a virtual environment and install dependencies.
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-```
-
-2. Copy the example environment file.
-
-```bash
-cp .env.example .env
-```
-
-3. Start the API.
-
-```bash
 uvicorn app.main:app --reload --port 8080
 ```
 
-## API Usage
+## API Endpoints
 
-Ingest a document:
+### Health
 
 ```bash
-curl -X POST http://localhost:8080/ingest \
+curl http://localhost:8080/health
+```
+
+### Periods
+
+```bash
+curl http://localhost:8080/analytics/periods
+```
+
+### Period Overview
+
+```bash
+curl "http://localhost:8080/analytics/periods/2026-01/overview"
+```
+
+### Category Breakdown
+
+```bash
+curl "http://localhost:8080/analytics/periods/2026-01/categories"
+```
+
+### Account Breakdown
+
+```bash
+curl "http://localhost:8080/analytics/periods/2026-01/accounts"
+```
+
+### Payment Method Breakdown
+
+```bash
+curl "http://localhost:8080/analytics/periods/2026-01/payment-methods"
+```
+
+### Daily Totals
+
+```bash
+curl "http://localhost:8080/analytics/periods/2026-01/daily"
+```
+
+### Criticality Breakdown
+
+```bash
+curl "http://localhost:8080/analytics/periods/2026-01/criticality"
+```
+
+### Duplicates
+
+```bash
+curl "http://localhost:8080/analytics/periods/2026-01/duplicates"
+```
+
+### Uncategorized
+
+```bash
+curl "http://localhost:8080/analytics/periods/2026-01/uncategorized"
+```
+
+### Outliers
+
+```bash
+curl "http://localhost:8080/analytics/periods/2026-01/outliers?limit=20"
+```
+
+### Natural-Language Ask
+
+```bash
+curl -X POST http://localhost:8080/rag/ask \
   -H "Content-Type: application/json" \
   -d '{
-    "doc_id": "doc-1",
-    "text": "FastAPI is a modern Python web framework for building APIs.",
-    "metadata": {"source": "example"}
+    "question": "Which accounts drove most of my spending in this period?",
+    "period": "2026-01",
+    "payment_method": "Credit Card",
+    "transaction_id": "trace-123"
   }'
 ```
 
-Delete a document:
-
-```bash
-curl -X DELETE http://localhost:8080/documents/doc-1
-```
-
-Update a document:
-
-```bash
-curl -X PUT http://localhost:8080/documents/doc-1 \
-  -H "Content-Type: application/json" \
-  -d '{
-    "text": "FastAPI is a Python framework for building APIs quickly.",
-    "metadata": {"source": "updated-example"}
-  }'
-```
-
-Query the RAG endpoint:
-
-```bash
-curl "http://localhost:8080/rag?query=What%20is%20FastAPI%3F"
-```
+The RAG service does not do retrieval from a vector store. It selects relevant Spring Boot analytics endpoints based on the question, fetches the relevant period-scoped data, and optionally uses an LLM to turn that structured context into a response.
 
 ## Docker
 
-Build and run locally:
-
 ```bash
-docker build -t fast-api-rag-template .
-docker run --env-file .env -p 8080:8080 fast-api-rag-template
+docker build -t finance-intelligence-api .
+docker run --env-file .env -p 8080:8080 finance-intelligence-api
 ```
 
-## DigitalOcean App Platform
+## Design Constraints
 
-1. Push the repository to GitHub.
-2. Provision a Managed PostgreSQL cluster. The app attempts to create the `vector` extension on startup.
-3. Create an App Platform app using Docker as the build type.
-4. Set environment variables in App Platform instead of committing secrets.
-5. Deploy the app. The container listens on port `8080` by default and also respects the `PORT` environment variable.
-
-## Implementation Notes
-
-- The app creates the `vector` extension, document table, and HNSW index on startup if they do not exist.
-- If `OPENAI_API_KEY` is not set, `/rag` returns retrieved context with a placeholder answer instead of calling an LLM.
-- Documents are stored in PostgreSQL with the original text under `text`, arbitrary metadata under `metadata`, and the embedding in a `vector` column.
-# fast-api-rag-template
+- FastAPI should not write financial data.
+- FastAPI should not reimplement analytics queries that belong in Spring Boot.
+- FastAPI should orchestrate, normalize, and explain.
