@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import unittest
-from datetime import date
+from datetime import date, datetime, timezone
 from unittest.mock import Mock
 
+from app.repositories import ConversationMessageRecord, ConversationRecord
 from app.services.rag_service import RAGService
 
 
@@ -86,9 +87,101 @@ class RAGServicePeriodResolutionTests(unittest.TestCase):
 
         self.assertEqual(resolved_period, "May2026")
         self.assertEqual(interpretation["source"], "current_statement_period_fallback")
-        self.service.spring.get_periods.assert_not_called()
+        self.assertEqual(self.service.spring.get_periods.call_count, 0)
+
+
+class RAGServiceConversationHistoryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.spring = Mock()
+        self.registry = Mock()
+        self.registry.select.return_value = []
+        self.registry.resolve.return_value = []
+        self.registry.execute.return_value = ({}, [])
+        self.registry.available_skills.return_value = []
+        self.llm = Mock()
+        self.llm.classify_intent.return_value = None
+        self.llm.generate_answer.return_value = "Stored answer"
+        self.history = Mock()
+        self.history.is_enabled.return_value = True
+        self.service = RAGService(self.spring, self.registry, self.llm, self.history)
+
+    def test_answer_creates_conversation_and_persists_both_messages(self) -> None:
+        self.history.create_conversation.return_value = ConversationRecord(
+            conversation_id="conv-123",
+            title="What did I spend?",
+            created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+            last_message_at=None,
+        )
+
+        response = self.service.answer(question="What did I spend?", period="May2026")
+
+        self.assertEqual(response.conversation_id, "conv-123")
+        self.history.create_conversation.assert_called_once()
+        self.assertEqual(self.history.append_message.call_count, 2)
+        user_call = self.history.append_message.call_args_list[0]
+        assistant_call = self.history.append_message.call_args_list[1]
+        self.assertEqual(user_call.args[0], "conv-123")
+        self.assertEqual(user_call.kwargs["role"], "user")
+        self.assertEqual(assistant_call.kwargs["role"], "assistant")
+        self.assertEqual(response.context["conversation"]["conversation_id"], "conv-123")
+
+    def test_answer_includes_prior_messages_for_existing_conversation(self) -> None:
+        self.history.get_conversation.return_value = ConversationRecord(
+            conversation_id="conv-456",
+            title="Spending chat",
+            created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+            last_message_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+        )
+        self.history.list_messages.return_value = [
+            ConversationMessageRecord(
+                message_id="msg-1",
+                role="user",
+                content="How much did I spend yesterday?",
+                period="May2026",
+                period_source="question_current_month",
+                created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+            )
+        ]
+
+        response = self.service.answer(
+            question="What about today?",
+            conversation_id="conv-456",
+            period="May2026",
+        )
+
+        self.history.create_conversation.assert_not_called()
+        self.history.list_messages.assert_called_once_with("conv-456", limit=self.service.conversation_history_context_limit)
+        self.assertEqual(response.context["conversation_history"][0]["content"], "How much did I spend yesterday?")
+
+    def test_get_conversation_history_returns_serialized_messages(self) -> None:
+        self.history.get_conversation.return_value = ConversationRecord(
+            conversation_id="conv-789",
+            title="Summary",
+            created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+            last_message_at=None,
+        )
+        self.history.list_messages.return_value = [
+            ConversationMessageRecord(
+                message_id="msg-2",
+                role="assistant",
+                content="You spent 42.",
+                period="May2026",
+                period_source="request_parameter",
+                created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+            )
+        ]
+
+        response = self.service.get_conversation_history("conv-789", limit=25)
+
+        self.history.list_messages.assert_called_once_with("conv-789", limit=25)
+        self.assertEqual(response.conversation_id, "conv-789")
+        self.assertEqual(response.messages[0].message_id, "msg-2")
 
 
 if __name__ == "__main__":
     unittest.main()
+
 

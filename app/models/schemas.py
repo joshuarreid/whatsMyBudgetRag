@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Optional, Union
 
@@ -13,6 +13,7 @@ class AnalyticsBaseModel(BaseModel):
 
 class RagAskRequest(AnalyticsBaseModel):
     question: str = Field(min_length=1)
+    conversation_id: Optional[str] = None
     period: Optional[str] = None
     payment_method: Optional[str] = None
     account: Optional[str] = None
@@ -36,6 +37,24 @@ class RagToolSelectionResponse(AnalyticsBaseModel):
     llm_suggested_tools: list[str] = Field(default_factory=list)
     deterministic_tools: list[str] = Field(default_factory=list)
     union_tools: list[str] = Field(default_factory=list)
+
+
+class RagConversationMessageResponse(AnalyticsBaseModel):
+    message_id: str
+    role: str
+    content: str
+    period: Optional[str] = None
+    period_source: Optional[str] = None
+    created_at: datetime
+
+
+class RagConversationResponse(AnalyticsBaseModel):
+    conversation_id: str
+    title: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    last_message_at: Optional[datetime] = None
+    messages: list[RagConversationMessageResponse] = Field(default_factory=list)
 
 
 class AnalyticsPeriodsResponse(AnalyticsBaseModel):
@@ -185,6 +204,7 @@ class InsightMonthOverMonthResponse(AnalyticsBaseModel):
 
 class RagAnswerResponse(AnalyticsBaseModel):
     question: str
+    conversation_id: Optional[str] = None
     period: str
     plan: list[str] = Field(default_factory=list)
     tool_selection: RagToolSelectionResponse = Field(default_factory=RagToolSelectionResponse)

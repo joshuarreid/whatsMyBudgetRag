@@ -54,6 +54,16 @@ LOG_LEVEL=INFO
 LOG_FORMAT=text
 OPENAI_API_KEY=
 OPENAI_CHAT_MODEL=gpt-4o-mini
+MYSQL_HOST=
+MYSQL_PORT=25060
+MYSQL_DATABASE=budget_rag
+MYSQL_USER=doadmin
+MYSQL_PASSWORD=
+MYSQL_SSL_DISABLED=false
+MYSQL_SSL_CA=
+MYSQL_CONNECT_TIMEOUT_SECONDS=10
+CONVERSATION_DEFAULT_USER=default-user
+CONVERSATION_HISTORY_CONTEXT_LIMIT=10
 INSIGHT_HIGH_SHARE_THRESHOLD=45
 INSIGHT_OUTLIER_AMOUNT_THRESHOLD=500
 ```
@@ -64,6 +74,10 @@ Notes:
 - `LOG_LEVEL` controls application and request logging verbosity.
 - `LOG_FORMAT` accepts `text` or `json` for human-readable or structured logs.
 - If `OPENAI_API_KEY` is unset, the `/rag/ask` endpoint still works and returns a deterministic summary from the fetched API context.
+- `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_DATABASE`, `MYSQL_USER`, and `MYSQL_PASSWORD` configure conversation history persistence in MySQL 8, including managed providers such as DigitalOcean.
+- `MYSQL_SSL_DISABLED=false` keeps TLS enabled for managed MySQL services; optionally set `MYSQL_SSL_CA` when your provider gives you a CA bundle path.
+- `CONVERSATION_DEFAULT_USER` defaults every saved conversation to a fixed owner such as `default-user` for this single-user app.
+- `CONVERSATION_HISTORY_CONTEXT_LIMIT` controls how many prior messages are injected into follow-up RAG prompts.
 - Questions without an explicit or inferred time reference now fall back to the current statement period, formatted as `MonthYear` (for example `May2026`).
 - `INSIGHT_HIGH_SHARE_THRESHOLD` controls when concentration warnings are emitted.
 - `INSIGHT_OUTLIER_AMOUNT_THRESHOLD` controls the amount threshold for derived outlier flags.
@@ -163,13 +177,21 @@ curl -X POST http://localhost:8080/rag/ask \
   -H "Content-Type: application/json" \
   -d '{
     "question": "Which accounts drove most of my spending in this period?",
-    "period": "2026-01",
+    "conversation_id": "existing-conversation-id-optional",
+    "period": "May2026",
     "payment_method": "Credit Card",
     "transaction_id": "trace-123"
   }'
 ```
 
 The RAG service does not do retrieval from a vector store. It selects relevant Spring Boot analytics endpoints based on the question, fetches the relevant period-scoped data, and optionally uses an LLM to turn that structured context into a response.
+When MySQL conversation history is configured, `/rag/ask` will create a conversation automatically when `conversation_id` is omitted and return the saved `conversation_id` in the response.
+
+### Conversation History
+
+```bash
+curl "http://localhost:8080/rag/conversations/<conversation_id>?limit=50"
+```
 
 ### Phase 2 Summary
 

@@ -4,3 +4,4 @@ openai>=1.86,<2.0
 python-dotenv>=1.1,<2.0
 pydantic>=2.11,<3.0
 requests>=2.32,<3.0
+mysql-connector-python>=9.0,<10.0

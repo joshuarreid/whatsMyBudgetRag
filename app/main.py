@@ -72,13 +72,23 @@ async def log_requests(request: Request, call_next):
 @app.on_event("startup")
 def log_startup() -> None:
     settings = get_settings()
+    mysql_history_enabled = all(
+        [
+            settings.mysql_host,
+            settings.mysql_database,
+            settings.mysql_user,
+            settings.mysql_password,
+        ]
+    )
     logger.info(
-        "Application startup complete spring_boot_base_url=%s timeout_seconds=%s log_level=%s log_format=%s openai_enabled=%s",
+        "Application startup complete spring_boot_base_url=%s timeout_seconds=%s log_level=%s log_format=%s openai_enabled=%s mysql_history_enabled=%s mysql_host=%s",
         settings.spring_boot_base_url,
         settings.request_timeout_seconds,
         settings.log_level,
         settings.log_format,
         bool(settings.openai_api_key),
+        mysql_history_enabled,
+        settings.mysql_host or "-",
     )
 
 

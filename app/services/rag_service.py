@@ -6,7 +6,21 @@ from datetime import date
 from typing import Any, Optional
 
 from app.clients.spring_boot_client import SpringBootClient
-from app.models.schemas import RagAnswerResponse, RagIntentResponse
+from app.core.config import get_settings
+from app.core.logging import get_request_id
+from app.models.schemas import (
+    RagAnswerResponse,
+    RagConversationMessageResponse,
+    RagConversationResponse,
+    RagIntentResponse,
+)
+from app.repositories import (
+    ConversationHistoryDisabledError,
+    ConversationHistoryRepository,
+    ConversationMessageRecord,
+    ConversationNotFoundError,
+    NullConversationHistoryRepository,
+)
 from app.skills.base import Skill, SkillRequest
 from app.skills.registry import SkillRegistry
 
@@ -52,14 +66,19 @@ class RAGService:
         spring_client: SpringBootClient,
         skill_registry: SkillRegistry,
         llm_service: Optional[Any] = None,
+        conversation_history: Optional[ConversationHistoryRepository] = None,
     ) -> None:
         self.spring = spring_client
         self.skill_registry = skill_registry
         self.llm = llm_service
+        settings = get_settings()
+        self.conversation_history = conversation_history or NullConversationHistoryRepository()
+        self.conversation_history_context_limit = settings.conversation_history_context_limit
 
     def answer(
         self,
         question: str,
+        conversation_id: Optional[str] = None,
         period: Optional[str] = None,
         payment_method: Optional[str] = None,
         account: Optional[str] = None,
@@ -74,6 +93,16 @@ class RAGService:
             len(question),
         )
         try:
+            resolved_conversation_id, prior_messages = self._prepare_conversation(
+                conversation_id=conversation_id,
+                question=question,
+            )
+            self._persist_message(
+                resolved_conversation_id,
+                role="user",
+                content=question,
+                transaction_id=transaction_id,
+            )
             selected_period, period_interpretation = self._resolve_period(
                 question=question,
                 period=period,
@@ -101,9 +130,30 @@ class RAGService:
                 period_interpretation=period_interpretation,
                 skills=selected_skills,
                 routing_metadata=routing_metadata,
+                conversation_id=resolved_conversation_id,
+                conversation_history=prior_messages,
             )
             llm_answer = self.llm.generate_answer(question, context) if self.llm else None
             answer = llm_answer or self._fallback_answer(context)
+            self._persist_message(
+                resolved_conversation_id,
+                role="assistant",
+                content=answer,
+                period=selected_period,
+                period_source=period_interpretation.get("source"),
+                transaction_id=transaction_id,
+                model_name=getattr(self.llm, "model", None),
+                tool_plan=routing_metadata.get("tool_selection"),
+                context_json=context,
+                answer_json={
+                    "question": question,
+                    "conversation_id": resolved_conversation_id,
+                    "period": selected_period,
+                    "plan": plan,
+                    "tool_selection": routing_metadata.get("tool_selection", {}),
+                    "answer": answer,
+                },
+            )
             logger.info(
                 "RAG answer completed period=%s context_keys=%s used_llm=%s",
                 selected_period,
@@ -112,6 +162,7 @@ class RAGService:
             )
             return RagAnswerResponse(
                 question=question,
+                conversation_id=resolved_conversation_id,
                 period=selected_period,
                 plan=plan,
                 tool_selection=routing_metadata.get("tool_selection", {}),
@@ -126,6 +177,22 @@ class RAGService:
                 account,
             )
             raise
+
+    def get_conversation_history(self, conversation_id: str, *, limit: int = 50) -> RagConversationResponse:
+        self._require_history_enabled()
+        conversation = self.conversation_history.get_conversation(conversation_id)
+        if conversation is None:
+            raise ConversationNotFoundError(f"Conversation {conversation_id} was not found")
+
+        messages = self.conversation_history.list_messages(conversation_id, limit=limit)
+        return RagConversationResponse(
+            conversation_id=conversation.conversation_id,
+            title=conversation.title,
+            created_at=conversation.created_at,
+            updated_at=conversation.updated_at,
+            last_message_at=conversation.last_message_at,
+            messages=[self._message_response(message) for message in messages],
+        )
 
     def _resolve_period(
         self,
@@ -226,6 +293,9 @@ class RAGService:
         period_interpretation: dict[str, str],
         skills: list[Skill],
         routing_metadata: dict[str, Any],
+        *,
+        conversation_id: Optional[str] = None,
+        conversation_history: Optional[list[ConversationMessageRecord]] = None,
     ) -> dict[str, Any]:
         timeline_context = self._build_timeline_context(
             period=skill_request.period,
@@ -246,6 +316,23 @@ class RAGService:
             },
             "routing": routing_metadata,
         }
+        if conversation_id is not None:
+            context["conversation"] = {
+                "conversation_id": conversation_id,
+                "history_message_count": len(conversation_history or []),
+            }
+        if conversation_history:
+            context["conversation_history"] = [
+                {
+                    "message_id": message.message_id,
+                    "role": message.role,
+                    "content": message.content,
+                    "period": message.period,
+                    "period_source": message.period_source,
+                    "created_at": message.created_at.isoformat(),
+                }
+                for message in conversation_history
+            ]
         skill_context, unavailable_skills = self.skill_registry.execute(skills, skill_request)
         context.update(skill_context)
 
@@ -356,6 +443,82 @@ class RAGService:
         target_month = self._month_number(month_text)
         target_year = today.year if target_month <= today.month else today.year - 1
         return self._format_statement_period(date(target_year, target_month, 1))
+
+    def _prepare_conversation(
+        self,
+        *,
+        conversation_id: Optional[str],
+        question: str,
+    ) -> tuple[Optional[str], list[ConversationMessageRecord]]:
+        if not self.conversation_history.is_enabled():
+            if conversation_id is not None:
+                raise ConversationHistoryDisabledError("Conversation history is not configured for this deployment")
+            return None, []
+
+        if conversation_id is None:
+            conversation = self.conversation_history.create_conversation(title=self._conversation_title(question))
+            return conversation.conversation_id, []
+
+        conversation = self.conversation_history.get_conversation(conversation_id)
+        if conversation is None:
+            raise ConversationNotFoundError(f"Conversation {conversation_id} was not found")
+
+        messages = self.conversation_history.list_messages(
+            conversation_id,
+            limit=self.conversation_history_context_limit,
+        )
+        return conversation_id, messages
+
+    def _persist_message(
+        self,
+        conversation_id: Optional[str],
+        *,
+        role: str,
+        content: str,
+        period: Optional[str] = None,
+        period_source: Optional[str] = None,
+        transaction_id: Optional[str] = None,
+        model_name: Optional[str] = None,
+        tool_plan: Optional[dict[str, Any]] = None,
+        context_json: Optional[dict[str, Any]] = None,
+        answer_json: Optional[dict[str, Any]] = None,
+    ) -> None:
+        if conversation_id is None:
+            return
+
+        self.conversation_history.append_message(
+            conversation_id,
+            role=role,
+            content=content,
+            period=period,
+            period_source=period_source,
+            transaction_id=transaction_id,
+            request_id=get_request_id(),
+            model_name=model_name,
+            tool_plan=tool_plan,
+            context_json=context_json,
+            answer_json=answer_json,
+        )
+
+    def _require_history_enabled(self) -> None:
+        if not self.conversation_history.is_enabled():
+            raise ConversationHistoryDisabledError("Conversation history is not configured for this deployment")
+
+    @staticmethod
+    def _conversation_title(question: str) -> str:
+        normalized = " ".join(question.split())
+        return normalized[:77] + "..." if len(normalized) > 80 else normalized
+
+    @staticmethod
+    def _message_response(message: ConversationMessageRecord) -> RagConversationMessageResponse:
+        return RagConversationMessageResponse(
+            message_id=message.message_id,
+            role=message.role,
+            content=message.content,
+            period=message.period,
+            period_source=message.period_source,
+            created_at=message.created_at,
+        )
 
 
     def _fallback_answer(self, context: dict[str, Any]) -> str:
