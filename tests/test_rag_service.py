@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from datetime import date, datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 from app.repositories import ConversationMessageRecord, ConversationRecord
@@ -10,7 +11,8 @@ from app.services.rag_service import RAGService
 
 class RAGServicePeriodResolutionTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.service = RAGService(Mock(), Mock(), None)
+        self.spring = Mock()
+        self.service = RAGService(self.spring, Mock(), None)
 
     def test_explicit_request_period_wins(self) -> None:
         resolved_period, interpretation = self.service._resolve_period(
@@ -87,7 +89,7 @@ class RAGServicePeriodResolutionTests(unittest.TestCase):
 
         self.assertEqual(resolved_period, "May2026")
         self.assertEqual(interpretation["source"], "current_statement_period_fallback")
-        self.assertEqual(self.service.spring.get_periods.call_count, 0)
+        self.assertEqual(self.spring.get_periods.call_count, 0)
 
 
 class RAGServiceConversationHistoryTests(unittest.TestCase):
@@ -96,13 +98,44 @@ class RAGServiceConversationHistoryTests(unittest.TestCase):
         self.registry = Mock()
         self.registry.select.return_value = []
         self.registry.resolve.return_value = []
-        self.registry.execute.return_value = ({}, [])
+        self.registry.execute.return_value = (
+            {"overview": {"total_amount": "42.00"}},
+            [],
+            [
+                {
+                    "tool_name": "overview",
+                    "context_key": "overview",
+                    "category": "analytics",
+                    "status": "ok",
+                    "duration_ms": 12,
+                    "cache_hit": False,
+                    "cacheable": True,
+                    "arguments": {
+                        "period": "May2026",
+                        "payment_method": None,
+                        "account": None,
+                        "transaction_id": None,
+                    },
+                    "result": {"total_amount": "42.00"},
+                    "result_summary": {"total_amount": "42.00"},
+                    "citation": {
+                        "source_type": "api",
+                        "source_ref": "api://overview?period=May2026",
+                        "source_title": "Overview source",
+                        "snippet": "overview -> total_amount=42.00",
+                        "score": 1.0,
+                    },
+                    "description": "Overview source",
+                }
+            ],
+        )
         self.registry.available_skills.return_value = []
         self.llm = Mock()
         self.llm.classify_intent.return_value = None
         self.llm.generate_answer.return_value = "Stored answer"
         self.history = Mock()
         self.history.is_enabled.return_value = True
+        self.history.get_tool_cache.return_value = None
         self.service = RAGService(self.spring, self.registry, self.llm, self.history)
 
     def test_answer_creates_conversation_and_persists_both_messages(self) -> None:
@@ -113,6 +146,25 @@ class RAGServiceConversationHistoryTests(unittest.TestCase):
             updated_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
             last_message_at=None,
         )
+        self.history.append_message.side_effect = [
+            ConversationMessageRecord(
+                message_id="msg-user",
+                role="user",
+                content="What did I spend?",
+                period=None,
+                period_source=None,
+                created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+            ),
+            ConversationMessageRecord(
+                db_id=42,
+                message_id="msg-assistant",
+                role="assistant",
+                content="Stored answer",
+                period="May2026",
+                period_source="request_parameter",
+                created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+            ),
+        ]
 
         response = self.service.answer(question="What did I spend?", period="May2026")
 
@@ -125,6 +177,11 @@ class RAGServiceConversationHistoryTests(unittest.TestCase):
         self.assertEqual(user_call.kwargs["role"], "user")
         self.assertEqual(assistant_call.kwargs["role"], "assistant")
         self.assertEqual(response.context["conversation"]["conversation_id"], "conv-123")
+        self.history.append_message_tool_calls.assert_called_once()
+        self.history.append_message_citations.assert_called_once()
+        self.history.upsert_tool_cache.assert_called_once()
+        self.assertGreaterEqual(len(response.tool_traces), 1)
+        self.assertGreaterEqual(len(response.citations), 1)
 
     def test_answer_includes_prior_messages_for_existing_conversation(self) -> None:
         self.history.get_conversation.return_value = ConversationRecord(
@@ -144,6 +201,25 @@ class RAGServiceConversationHistoryTests(unittest.TestCase):
                 created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
             )
         ]
+        self.history.append_message.side_effect = [
+            ConversationMessageRecord(
+                message_id="msg-user",
+                role="user",
+                content="What about today?",
+                period=None,
+                period_source=None,
+                created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+            ),
+            ConversationMessageRecord(
+                db_id=99,
+                message_id="msg-assistant",
+                role="assistant",
+                content="Stored answer",
+                period="May2026",
+                period_source="request_parameter",
+                created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+            ),
+        ]
 
         response = self.service.answer(
             question="What about today?",
@@ -154,6 +230,90 @@ class RAGServiceConversationHistoryTests(unittest.TestCase):
         self.history.create_conversation.assert_not_called()
         self.history.list_messages.assert_called_once_with("conv-456", limit=self.service.conversation_history_context_limit)
         self.assertEqual(response.context["conversation_history"][0]["content"], "How much did I spend yesterday?")
+
+    def test_answer_uses_conversation_cache_for_repeated_tool_requests(self) -> None:
+        self.history.create_conversation.return_value = ConversationRecord(
+            conversation_id="conv-cache",
+            title="Cached chat",
+            created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+            last_message_at=None,
+        )
+        self.history.append_message.side_effect = [
+            ConversationMessageRecord(
+                message_id="msg-user",
+                role="user",
+                content="What did I spend?",
+                period=None,
+                period_source=None,
+                created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+            ),
+            ConversationMessageRecord(
+                db_id=100,
+                message_id="msg-assistant",
+                role="assistant",
+                content="Stored answer",
+                period="May2026",
+                period_source="request_parameter",
+                created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+            ),
+        ]
+        self.history.get_tool_cache.return_value = {
+            "response_json": {
+                "context_key": "overview",
+                "payload": {"total_amount": "42.00"},
+                "metadata": {
+                    "citation": {
+                        "source_type": "api",
+                        "source_ref": "api://overview?period=May2026",
+                        "source_title": "Overview source",
+                        "snippet": "overview -> total_amount=42.00",
+                        "score": 1.0,
+                    }
+                },
+            },
+            "created_at": "2026-05-23T00:00:00+00:00",
+            "expires_at": "2026-05-23T00:15:00+00:00",
+        }
+
+        def execute_with_cache(skills, request, cache_lookup=None):
+            arguments = {
+                "period": request.period,
+                "payment_method": request.payment_method,
+                "account": request.account,
+                "transaction_id": request.transaction_id,
+            }
+            cached = cache_lookup(SimpleNamespace(skill_id="overview", context_key="overview"), arguments)
+            self.assertIsNotNone(cached)
+            return (
+                {"overview": cached["payload"]},
+                [],
+                [
+                    {
+                        "tool_name": "overview",
+                        "context_key": "overview",
+                        "category": "analytics",
+                        "status": "ok",
+                        "duration_ms": 1,
+                        "cache_hit": True,
+                        "cacheable": True,
+                        "arguments": arguments,
+                        "result": cached["payload"],
+                        "result_summary": {"total_amount": "42.00"},
+                        "citation": cached["metadata"]["citation"],
+                        "description": "Overview source",
+                    }
+                ],
+            )
+
+        self.registry.execute.side_effect = execute_with_cache
+
+        response = self.service.answer(question="What did I spend?", period="May2026")
+
+        self.history.get_tool_cache.assert_called()
+        self.assertEqual(response.cache.hits, 1)
+        self.assertTrue(response.tool_traces[0].cache_hit)
+        self.history.upsert_tool_cache.assert_not_called()
 
     def test_get_conversation_history_returns_serialized_messages(self) -> None:
         self.history.get_conversation.return_value = ConversationRecord(

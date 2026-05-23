@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Protocol
 from uuid import uuid4
 
@@ -42,6 +42,7 @@ class ConversationMessageRecord:
     period: Optional[str]
     period_source: Optional[str]
     created_at: datetime
+    db_id: Optional[int] = None
 
 
 class ConversationHistoryRepository(Protocol):
@@ -73,6 +74,41 @@ class ConversationHistoryRepository(Protocol):
         context_json: Optional[dict[str, Any]] = None,
         answer_json: Optional[dict[str, Any]] = None,
     ) -> ConversationMessageRecord: ...
+
+    def append_message_tool_calls(
+        self,
+        message_id: str,
+        *,
+        tool_calls: list[dict[str, Any]],
+    ) -> None: ...
+
+    def append_message_citations(
+        self,
+        message_id: str,
+        *,
+        citations: list[dict[str, Any]],
+    ) -> None: ...
+
+    def get_tool_cache(
+        self,
+        conversation_id: str,
+        *,
+        tool_name: str,
+        cache_key: str,
+    ) -> Optional[dict[str, Any]]: ...
+
+    def upsert_tool_cache(
+        self,
+        conversation_id: str,
+        *,
+        tool_name: str,
+        cache_key: str,
+        period: Optional[str],
+        params_json: dict[str, Any],
+        response_json: dict[str, Any],
+        source_message_db_id: Optional[int] = None,
+        ttl_seconds: Optional[int] = None,
+    ) -> None: ...
 
 
 class NullConversationHistoryRepository:
@@ -108,6 +144,45 @@ class NullConversationHistoryRepository:
         context_json: Optional[dict[str, Any]] = None,
         answer_json: Optional[dict[str, Any]] = None,
     ) -> ConversationMessageRecord:
+        raise ConversationHistoryDisabledError("Conversation history persistence is not configured")
+
+    def append_message_tool_calls(
+        self,
+        message_id: str,
+        *,
+        tool_calls: list[dict[str, Any]],
+    ) -> None:
+        raise ConversationHistoryDisabledError("Conversation history persistence is not configured")
+
+    def append_message_citations(
+        self,
+        message_id: str,
+        *,
+        citations: list[dict[str, Any]],
+    ) -> None:
+        raise ConversationHistoryDisabledError("Conversation history persistence is not configured")
+
+    def get_tool_cache(
+        self,
+        conversation_id: str,
+        *,
+        tool_name: str,
+        cache_key: str,
+    ) -> Optional[dict[str, Any]]:
+        raise ConversationHistoryDisabledError("Conversation history persistence is not configured")
+
+    def upsert_tool_cache(
+        self,
+        conversation_id: str,
+        *,
+        tool_name: str,
+        cache_key: str,
+        period: Optional[str],
+        params_json: dict[str, Any],
+        response_json: dict[str, Any],
+        source_message_db_id: Optional[int] = None,
+        ttl_seconds: Optional[int] = None,
+    ) -> None:
         raise ConversationHistoryDisabledError("Conversation history persistence is not configured")
 
 
@@ -231,7 +306,7 @@ class MySQLConversationHistoryRepository:
             connection.close()
 
         # Ensure each row is a dict (should be with dictionary=True, but be defensive)
-        result = []
+        result: list[ConversationMessageRecord] = []
         for row in reversed(rows):
             if not isinstance(row, dict):
                 raise TypeError("Row returned from fetchall is not a dict. Check cursor configuration.")
@@ -276,27 +351,7 @@ class MySQLConversationHistoryRepository:
 
                 # Defensive: handle Decimal, float, int, str, etc.
                 raw_id = conversation_row["id"]
-                if raw_id is None:
-                    raise ValueError("Conversation id is None")
-                if isinstance(raw_id, int):
-                    internal_conversation_id = raw_id
-                elif isinstance(raw_id, float):
-                    internal_conversation_id = int(raw_id)
-                elif hasattr(raw_id, "__int__"):
-                    internal_conversation_id = int(raw_id)
-                elif isinstance(raw_id, str):
-                    internal_conversation_id = int(raw_id)
-                elif isinstance(raw_id, bytes):
-                    internal_conversation_id = int(raw_id.decode())
-                else:
-                    try:
-                        from decimal import Decimal
-                        if isinstance(raw_id, Decimal):
-                            internal_conversation_id = int(raw_id)
-                        else:
-                            internal_conversation_id = int(str(raw_id))
-                    except Exception:
-                        raise TypeError(f"Cannot convert id to int: {type(raw_id)}")
+                internal_conversation_id = self._coerce_int(raw_id, field_name="conversation id")
                 cursor.execute(
                     """
                     SELECT COALESCE(MAX(sequence_no), 0) + 1 AS next_sequence_no
@@ -307,27 +362,7 @@ class MySQLConversationHistoryRepository:
                     (internal_conversation_id,),
                 )
                 raw_seq = cursor.fetchone()["next_sequence_no"]
-                if raw_seq is None:
-                    raise ValueError("next_sequence_no is None")
-                if isinstance(raw_seq, int):
-                    next_sequence_no = raw_seq
-                elif isinstance(raw_seq, float):
-                    next_sequence_no = int(raw_seq)
-                elif hasattr(raw_seq, "__int__"):
-                    next_sequence_no = int(raw_seq)
-                elif isinstance(raw_seq, str):
-                    next_sequence_no = int(raw_seq)
-                elif isinstance(raw_seq, bytes):
-                    next_sequence_no = int(raw_seq.decode())
-                else:
-                    try:
-                        from decimal import Decimal
-                        if isinstance(raw_seq, Decimal):
-                            next_sequence_no = int(raw_seq)
-                        else:
-                            next_sequence_no = int(str(raw_seq))
-                    except Exception:
-                        raise TypeError(f"Cannot convert next_sequence_no to int: {type(raw_seq)}")
+                next_sequence_no = self._coerce_int(raw_seq, field_name="next_sequence_no")
 
                 cursor.execute(
                     """
@@ -364,6 +399,7 @@ class MySQLConversationHistoryRepository:
                         self._json_or_none(answer_json),
                     ),
                 )
+                inserted_message_row_id = cursor.lastrowid
                 cursor.execute(
                     """
                     UPDATE conversations
@@ -387,6 +423,7 @@ class MySQLConversationHistoryRepository:
             connection.close()
 
         return ConversationMessageRecord(
+            db_id=self._coerce_int(inserted_message_row_id, field_name="inserted message id"),
             message_id=message_id,
             role=role,
             content=content,
@@ -394,6 +431,239 @@ class MySQLConversationHistoryRepository:
             period_source=period_source,
             created_at=created_at,
         )
+
+    def append_message_tool_calls(
+        self,
+        message_id: str,
+        *,
+        tool_calls: list[dict[str, Any]],
+    ) -> None:
+        self._ensure_enabled()
+        if not tool_calls:
+            return
+
+        connection = self._connect()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            try:
+                message_row_id = self._get_message_row_id(cursor, message_id)
+                for index, tool_call in enumerate(tool_calls, start=1):
+                    cursor.execute(
+                        """
+                        INSERT INTO message_tool_calls (
+                            message_id,
+                            tool_name,
+                            call_order,
+                            arguments_json,
+                            result_json,
+                            status,
+                            error_text,
+                            duration_ms
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            message_row_id,
+                            tool_call.get("tool_name", "unknown"),
+                            index,
+                            self._json_or_none(tool_call.get("arguments")),
+                            self._json_or_none(tool_call.get("result")),
+                            tool_call.get("status", "ok"),
+                            tool_call.get("error_text"),
+                            tool_call.get("duration_ms"),
+                        ),
+                    )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                logger.exception("Failed to append message tool calls message_id=%s", message_id)
+                raise
+            finally:
+                cursor.close()
+        finally:
+            connection.close()
+
+    def append_message_citations(
+        self,
+        message_id: str,
+        *,
+        citations: list[dict[str, Any]],
+    ) -> None:
+        self._ensure_enabled()
+        if not citations:
+            return
+
+        connection = self._connect()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            try:
+                message_row_id = self._get_message_row_id(cursor, message_id)
+                for index, citation in enumerate(citations, start=1):
+                    cursor.execute(
+                        """
+                        INSERT INTO message_citations (
+                            message_id,
+                            citation_order,
+                            source_type,
+                            source_ref,
+                            source_title,
+                            snippet,
+                            score
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            message_row_id,
+                            index,
+                            citation.get("source_type", "api"),
+                            citation.get("source_ref", "unknown"),
+                            citation.get("source_title"),
+                            citation.get("snippet"),
+                            citation.get("score"),
+                        ),
+                    )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                logger.exception("Failed to append message citations message_id=%s", message_id)
+                raise
+            finally:
+                cursor.close()
+        finally:
+            connection.close()
+
+    def get_tool_cache(
+        self,
+        conversation_id: str,
+        *,
+        tool_name: str,
+        cache_key: str,
+    ) -> Optional[dict[str, Any]]:
+        self._ensure_enabled()
+
+        connection = self._connect()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            try:
+                cursor.execute(
+                    """
+                    SELECT ctc.id, ctc.response_json, ctc.created_at, ctc.expires_at
+                    FROM conversation_tool_cache ctc
+                    INNER JOIN conversations c ON c.id = ctc.conversation_id
+                    WHERE c.conversation_uuid = %s
+                      AND c.status <> 'deleted'
+                      AND ctc.tool_name = %s
+                      AND ctc.cache_key = %s
+                      AND ctc.invalidated_at IS NULL
+                      AND (ctc.expires_at IS NULL OR ctc.expires_at >= UTC_TIMESTAMP(6))
+                    LIMIT 1
+                    """,
+                    (conversation_id, tool_name, cache_key),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    return None
+
+                cursor.execute(
+                    """
+                    UPDATE conversation_tool_cache
+                    SET hit_count = hit_count + 1,
+                        last_hit_at = CURRENT_TIMESTAMP(6)
+                    WHERE id = %s
+                    """,
+                    (self._coerce_int(row["id"], field_name="cache id"),),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                logger.exception(
+                    "Failed to read conversation tool cache conversation_id=%s tool_name=%s",
+                    conversation_id,
+                    tool_name,
+                )
+                raise
+            finally:
+                cursor.close()
+        finally:
+            connection.close()
+
+        response_json = self._json_from_db_value(row.get("response_json"))
+        if not isinstance(response_json, dict):
+            return None
+        return {
+            "response_json": response_json,
+            "created_at": self._datetime_to_isoformat(row.get("created_at")),
+            "expires_at": self._datetime_to_isoformat(row.get("expires_at")),
+        }
+
+    def upsert_tool_cache(
+        self,
+        conversation_id: str,
+        *,
+        tool_name: str,
+        cache_key: str,
+        period: Optional[str],
+        params_json: dict[str, Any],
+        response_json: dict[str, Any],
+        source_message_db_id: Optional[int] = None,
+        ttl_seconds: Optional[int] = None,
+    ) -> None:
+        self._ensure_enabled()
+        expires_at = self._utcnow() + timedelta(seconds=ttl_seconds) if ttl_seconds else None
+
+        connection = self._connect()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            try:
+                conversation_row_id = self._get_conversation_row_id(cursor, conversation_id)
+                cursor.execute(
+                    """
+                    INSERT INTO conversation_tool_cache (
+                        conversation_id,
+                        tool_name,
+                        cache_key,
+                        period,
+                        params_json,
+                        response_json,
+                        source_message_id,
+                        expires_at,
+                        invalidated_at,
+                        hit_count,
+                        last_hit_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL, 0, NULL)
+                    ON DUPLICATE KEY UPDATE
+                        period = VALUES(period),
+                        params_json = VALUES(params_json),
+                        response_json = VALUES(response_json),
+                        source_message_id = VALUES(source_message_id),
+                        expires_at = VALUES(expires_at),
+                        invalidated_at = NULL
+                    """,
+                    (
+                        conversation_row_id,
+                        tool_name,
+                        cache_key,
+                        period,
+                        self._json_or_none(params_json),
+                        self._json_or_none(response_json),
+                        source_message_db_id,
+                        expires_at,
+                    ),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                logger.exception(
+                    "Failed to upsert conversation tool cache conversation_id=%s tool_name=%s",
+                    conversation_id,
+                    tool_name,
+                )
+                raise
+            finally:
+                cursor.close()
+        finally:
+            connection.close()
 
     def _ensure_enabled(self) -> None:
         if not self._enabled:
@@ -423,7 +693,7 @@ class MySQLConversationHistoryRepository:
         return mysql.connector.connect(**connect_kwargs)
 
     @staticmethod
-    def _json_or_none(value: Optional[dict[str, Any]]) -> Optional[str]:
+    def _json_or_none(value: Any) -> Optional[str]:
         return json.dumps(value, default=str) if value is not None else None
 
     @staticmethod
@@ -443,6 +713,7 @@ class MySQLConversationHistoryRepository:
     @staticmethod
     def _message_from_row(row: dict[str, Any]) -> ConversationMessageRecord:
         return ConversationMessageRecord(
+            db_id=row.get("id"),
             message_id=row["message_uuid"],
             role=row["role"],
             content=row["content"],
@@ -450,6 +721,65 @@ class MySQLConversationHistoryRepository:
             period_source=row.get("period_source"),
             created_at=row["created_at"],
         )
+
+    @staticmethod
+    def _json_from_db_value(value: Any) -> Any:
+        if value is None or isinstance(value, (dict, list)):
+            return value
+        if isinstance(value, (bytes, bytearray)):
+            value = value.decode()
+        if isinstance(value, str):
+            return json.loads(value)
+        return value
+
+    @staticmethod
+    def _datetime_to_isoformat(value: Any) -> Optional[str]:
+        if isinstance(value, datetime):
+            return value.isoformat()
+        return None
+
+    @staticmethod
+    def _get_message_row_id(cursor: Any, message_id: str) -> int:
+        cursor.execute(
+            """
+            SELECT id
+            FROM messages
+            WHERE message_uuid = %s
+            LIMIT 1
+            """,
+            (message_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise ConversationNotFoundError(f"Message {message_id} was not found")
+        return MySQLConversationHistoryRepository._coerce_int(row["id"], field_name="message id")
+
+    @staticmethod
+    def _get_conversation_row_id(cursor: Any, conversation_id: str) -> int:
+        cursor.execute(
+            """
+            SELECT id
+            FROM conversations
+            WHERE conversation_uuid = %s AND status <> 'deleted'
+            LIMIT 1
+            """,
+            (conversation_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise ConversationNotFoundError(f"Conversation {conversation_id} was not found")
+        return MySQLConversationHistoryRepository._coerce_int(row["id"], field_name="conversation id")
+
+    @staticmethod
+    def _coerce_int(value: Any, *, field_name: str) -> int:
+        if value is None:
+            raise ValueError(f"{field_name} is None")
+        if isinstance(value, bytes):
+            return int(value.decode())
+        try:
+            return int(value)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(f"Cannot convert {field_name} to int: {type(value)}") from exc
 
 
 

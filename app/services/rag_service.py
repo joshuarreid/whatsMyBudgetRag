@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import re
 from datetime import date
@@ -10,9 +12,12 @@ from app.core.config import get_settings
 from app.core.logging import get_request_id
 from app.models.schemas import (
     RagAnswerResponse,
+    RagCacheMetadataResponse,
+    RagCitationResponse,
     RagConversationMessageResponse,
     RagConversationResponse,
     RagIntentResponse,
+    RagToolTraceResponse,
 )
 from app.repositories import (
     ConversationHistoryDisabledError,
@@ -25,6 +30,9 @@ from app.skills.base import Skill, SkillRequest
 from app.skills.registry import SkillRegistry
 
 logger = logging.getLogger(__name__)
+
+TOOL_CACHE_TTL_SECONDS = 900
+MAX_RESPONSE_CITATIONS = 5
 
 STATEMENT_PERIOD_MONTHS = (
     "January",
@@ -124,7 +132,7 @@ class RAGService:
                 account=account,
                 transaction_id=transaction_id,
             )
-            context = self._build_context(
+            context, tool_traces, response_citations, cache_metadata = self._build_context(
                 skill_request=skill_request,
                 plan=plan,
                 period_interpretation=period_interpretation,
@@ -135,7 +143,7 @@ class RAGService:
             )
             llm_answer = self.llm.generate_answer(question, context) if self.llm else None
             answer = llm_answer or self._fallback_answer(context)
-            self._persist_message(
+            assistant_message = self._persist_message(
                 resolved_conversation_id,
                 role="assistant",
                 content=answer,
@@ -151,8 +159,19 @@ class RAGService:
                     "period": selected_period,
                     "plan": plan,
                     "tool_selection": routing_metadata.get("tool_selection", {}),
+                    "citations": response_citations,
+                    "tool_traces": self._response_tool_traces(tool_traces),
+                    "cache": cache_metadata,
                     "answer": answer,
                 },
+            )
+            self._persist_tooling_metadata(
+                assistant_message,
+                conversation_id=resolved_conversation_id,
+                tool_traces=tool_traces,
+                citations=response_citations,
+                cache_metadata=cache_metadata,
+                period=selected_period,
             )
             logger.info(
                 "RAG answer completed period=%s context_keys=%s used_llm=%s",
@@ -167,6 +186,9 @@ class RAGService:
                 plan=plan,
                 tool_selection=routing_metadata.get("tool_selection", {}),
                 context=context,
+                citations=[RagCitationResponse.model_validate(citation) for citation in response_citations],
+                tool_traces=self._response_tool_traces(tool_traces),
+                cache=RagCacheMetadataResponse.model_validate(cache_metadata),
                 answer=answer,
             )
         except Exception:
@@ -296,7 +318,7 @@ class RAGService:
         *,
         conversation_id: Optional[str] = None,
         conversation_history: Optional[list[ConversationMessageRecord]] = None,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
         timeline_context = self._build_timeline_context(
             period=skill_request.period,
             period_interpretation=period_interpretation,
@@ -333,14 +355,24 @@ class RAGService:
                 }
                 for message in conversation_history
             ]
-        skill_context, unavailable_skills = self.skill_registry.execute(skills, skill_request)
+        skill_context, unavailable_skills, tool_traces = self.skill_registry.execute(
+            skills,
+            skill_request,
+            cache_lookup=(self._cache_lookup(conversation_id) if conversation_id is not None else None),
+        )
         context.update(skill_context)
 
         if unavailable_skills:
             context["unavailable_tools"] = unavailable_skills
             context["degraded"] = True
 
-        return context
+        response_citations = self._response_citations(tool_traces)
+        cache_metadata = self._cache_metadata(conversation_id, tool_traces)
+        context["supporting_sources"] = response_citations
+        context["cache"] = cache_metadata
+        context["tool_trace_summaries"] = [trace.model_dump(mode="json") for trace in self._response_tool_traces(tool_traces)]
+
+        return context, tool_traces, response_citations, cache_metadata
 
     def _select_skills(self, question: str) -> tuple[list[Skill], dict[str, Any]]:
         llm_intent = self._classify_intent(question)
@@ -482,11 +514,11 @@ class RAGService:
         tool_plan: Optional[dict[str, Any]] = None,
         context_json: Optional[dict[str, Any]] = None,
         answer_json: Optional[dict[str, Any]] = None,
-    ) -> None:
+    ) -> Optional[ConversationMessageRecord]:
         if conversation_id is None:
-            return
+            return None
 
-        self.conversation_history.append_message(
+        return self.conversation_history.append_message(
             conversation_id,
             role=role,
             content=content,
@@ -499,6 +531,158 @@ class RAGService:
             context_json=context_json,
             answer_json=answer_json,
         )
+
+    def _persist_tooling_metadata(
+        self,
+        assistant_message: Optional[ConversationMessageRecord],
+        *,
+        conversation_id: Optional[str],
+        tool_traces: list[dict[str, Any]],
+        citations: list[dict[str, Any]],
+        cache_metadata: dict[str, Any],
+        period: str,
+    ) -> None:
+        if assistant_message is None or conversation_id is None:
+            return
+
+        persisted_tool_calls = [
+            {
+                "tool_name": trace.get("tool_name"),
+                "arguments": trace.get("arguments", {}),
+                "result": {
+                    "context_key": trace.get("context_key"),
+                    "result_summary": trace.get("result_summary", {}),
+                    "cache_hit": trace.get("cache_hit", False),
+                    "citation": trace.get("citation"),
+                },
+                "status": trace.get("status", "ok"),
+                "error_text": trace.get("error_text"),
+                "duration_ms": trace.get("duration_ms"),
+            }
+            for trace in tool_traces
+        ]
+        self.conversation_history.append_message_tool_calls(
+            assistant_message.message_id,
+            tool_calls=persisted_tool_calls,
+        )
+        self.conversation_history.append_message_citations(
+            assistant_message.message_id,
+            citations=citations,
+        )
+
+        writes = 0
+        for trace in tool_traces:
+            if trace.get("status") != "ok" or trace.get("cache_hit") or not trace.get("cacheable"):
+                continue
+            tool_name = trace.get("tool_name")
+            arguments = trace.get("arguments", {})
+            if not isinstance(tool_name, str):
+                continue
+            cache_key = self._tool_cache_key(tool_name, arguments)
+            self.conversation_history.upsert_tool_cache(
+                conversation_id,
+                tool_name=tool_name,
+                cache_key=cache_key,
+                period=period,
+                params_json=self._cacheable_arguments(arguments),
+                response_json={
+                    "context_key": trace.get("context_key"),
+                    "payload": trace.get("result"),
+                    "metadata": {
+                        "citation": trace.get("citation"),
+                        "description": trace.get("description"),
+                    },
+                },
+                source_message_db_id=assistant_message.db_id,
+                ttl_seconds=TOOL_CACHE_TTL_SECONDS,
+            )
+            writes += 1
+        cache_metadata["writes"] = writes
+
+    def _cache_lookup(
+        self,
+        conversation_id: str,
+    ):
+        def lookup(skill: Skill, arguments: dict[str, Any]) -> Optional[dict[str, Any]]:
+            cache_key = self._tool_cache_key(skill.skill_id, arguments)
+            cached_entry = self.conversation_history.get_tool_cache(
+                conversation_id,
+                tool_name=skill.skill_id,
+                cache_key=cache_key,
+            )
+            if cached_entry is None:
+                return None
+            response_json = cached_entry.get("response_json")
+            if not isinstance(response_json, dict):
+                return None
+            return {
+                "context_key": response_json.get("context_key", skill.context_key),
+                "payload": response_json.get("payload"),
+                "metadata": response_json.get("metadata", {}),
+                "created_at": cached_entry.get("created_at"),
+                "expires_at": cached_entry.get("expires_at"),
+            }
+
+        return lookup
+
+    @staticmethod
+    def _cacheable_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: value
+            for key, value in arguments.items()
+            if value is not None and key not in {"transaction_id"}
+        }
+
+    def _tool_cache_key(self, tool_name: str, arguments: dict[str, Any]) -> str:
+        cache_input = {
+            "tool_name": tool_name,
+            "arguments": self._cacheable_arguments(arguments),
+        }
+        return hashlib.sha256(json.dumps(cache_input, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+    def _response_citations(self, tool_traces: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        citations: list[dict[str, Any]] = []
+        seen_source_refs: set[str] = set()
+        for trace in tool_traces:
+            citation = trace.get("citation")
+            if trace.get("status") != "ok" or not isinstance(citation, dict):
+                continue
+            source_ref = citation.get("source_ref")
+            if not isinstance(source_ref, str) or source_ref in seen_source_refs:
+                continue
+            seen_source_refs.add(source_ref)
+            citations.append(citation)
+            if len(citations) >= MAX_RESPONSE_CITATIONS:
+                break
+        return citations
+
+    def _response_tool_traces(self, tool_traces: list[dict[str, Any]]) -> list[RagToolTraceResponse]:
+        return [
+            RagToolTraceResponse(
+                tool_name=str(trace.get("tool_name", "unknown")),
+                context_key=str(trace.get("context_key", "unknown")),
+                category=str(trace.get("category", "unknown")),
+                status=str(trace.get("status", "ok")),
+                duration_ms=trace.get("duration_ms"),
+                cache_hit=bool(trace.get("cache_hit", False)),
+                arguments=trace.get("arguments", {}) if isinstance(trace.get("arguments"), dict) else {},
+                result_summary=trace.get("result_summary", {}) if isinstance(trace.get("result_summary"), dict) else {},
+                error_text=trace.get("error_text"),
+            )
+            for trace in tool_traces
+        ]
+
+    def _cache_metadata(self, conversation_id: Optional[str], tool_traces: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "enabled": conversation_id is not None and self.conversation_history.is_enabled(),
+            "hits": sum(1 for trace in tool_traces if trace.get("cache_hit")),
+            "misses": sum(
+                1
+                for trace in tool_traces
+                if trace.get("status") == "ok" and trace.get("cacheable") and not trace.get("cache_hit")
+            ),
+            "writes": 0,
+        }
 
     def _require_history_enabled(self) -> None:
         if not self.conversation_history.is_enabled():

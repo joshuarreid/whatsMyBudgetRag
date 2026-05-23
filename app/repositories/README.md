@@ -43,6 +43,8 @@ The backend should:
 - call Spring Boot analytics APIs
 - optionally call the LLM
 - persist both the user message and assistant response
+- persist per-answer tool execution metadata and citations
+- reuse conversation-scoped cached tool results for repeated idempotent reads
 - return the answer plus the active `conversation_id`
 
 ### Database responsibilities
@@ -51,8 +53,9 @@ MySQL stores:
 
 - conversation threads in `conversations`
 - user and assistant turns in `messages`
-- optional tool-call snapshots in `message_tool_calls`
-- optional cached tool results in `conversation_tool_cache`
+- tool execution metadata in `message_tool_calls`
+- answer provenance in `message_citations`
+- cached tool results in `conversation_tool_cache`
 
 The frontend should never query these tables directly.
 
@@ -184,6 +187,41 @@ Primary endpoint for sending a message.
         "created_at": "2026-05-23T12:00:00+00:00"
       }
     ]
+  },
+  "citations": [
+    {
+      "source_type": "api",
+      "source_ref": "api://top_categories?period=May2026",
+      "source_title": "Load the highest-spend categories for the selected statement period.",
+      "snippet": "top_categories -> item_count=5",
+      "score": 1.0
+    }
+  ],
+  "tool_traces": [
+    {
+      "tool_name": "top_categories",
+      "context_key": "top_categories",
+      "category": "analytics",
+      "status": "ok",
+      "duration_ms": 18,
+      "cache_hit": false,
+      "arguments": {
+        "period": "May2026",
+        "payment_method": null,
+        "account": null,
+        "transaction_id": null
+      },
+      "result_summary": {
+        "item_count": 5
+      },
+      "error_text": null
+    }
+  ],
+  "cache": {
+    "enabled": true,
+    "hits": 0,
+    "misses": 2,
+    "writes": 2
   },
   "answer": "Your top categories this month were groceries and dining."
 }

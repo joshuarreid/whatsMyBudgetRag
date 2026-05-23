@@ -13,6 +13,7 @@ class SkillDefinition:
     description: str
     keywords: tuple[str, ...] = ()
     required: bool = False
+    cacheable: bool = True
 
 
 @dataclass(frozen=True)

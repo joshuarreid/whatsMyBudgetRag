@@ -96,7 +96,7 @@ class SkillRegistryTests(unittest.TestCase):
             ]
         )
 
-        context_sections, unavailable = registry.execute(
+        context_sections, unavailable, tool_traces = registry.execute(
             registry.skills,
             SkillRequest(question="test", period="May2026"),
         )
@@ -104,6 +104,8 @@ class SkillRegistryTests(unittest.TestCase):
         self.assertEqual(context_sections["overview"], {"total": 1})
         self.assertEqual(unavailable[0]["tool"], "categories")
         self.assertEqual(unavailable[0]["status_code"], 503)
+        self.assertEqual(tool_traces[0]["tool_name"], "overview")
+        self.assertEqual(tool_traces[1]["status"], "error")
 
     def test_execute_raises_for_required_skills(self) -> None:
         registry = SkillRegistry(
@@ -120,6 +122,29 @@ class SkillRegistryTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             registry.execute(registry.skills, SkillRequest(question="test", period="May2026"))
+
+    def test_execute_uses_cache_lookup_for_cacheable_skills(self) -> None:
+        registry = SkillRegistry(
+            [
+                StubSkill(skill_id="overview", context_key="overview", keywords=("spend",), payload={"total": 1}),
+            ]
+        )
+
+        context_sections, unavailable, tool_traces = registry.execute(
+            registry.skills,
+            SkillRequest(question="test", period="May2026"),
+            cache_lookup=lambda skill, arguments: {
+                "context_key": skill.context_key,
+                "payload": {"total": 99},
+                "metadata": {},
+                "created_at": "2026-05-23T00:00:00+00:00",
+                "expires_at": "2026-05-23T00:15:00+00:00",
+            },
+        )
+
+        self.assertEqual(context_sections["overview"], {"total": 99})
+        self.assertEqual(unavailable, [])
+        self.assertTrue(tool_traces[0]["cache_hit"])
 
 
 class RAGServiceSkillIntegrationTests(unittest.TestCase):
@@ -155,6 +180,9 @@ class RAGServiceSkillIntegrationTests(unittest.TestCase):
         self.assertEqual(response.context["skills"]["selected"], ["overview", "averages"])
         self.assertEqual(response.context["overview"]["total_amount"], "100.00")
         self.assertEqual(response.context["averages"]["average_transaction_amount"], "25.00")
+        self.assertEqual(response.citations[0].source_type, "api")
+        self.assertEqual(response.tool_traces[0].tool_name, "overview")
+        self.assertFalse(response.tool_traces[0].cache_hit)
 
     def test_answer_prefers_llm_intent_when_it_resolves_to_registered_skills(self) -> None:
         registry = SkillRegistry(

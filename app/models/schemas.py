@@ -39,6 +39,33 @@ class RagToolSelectionResponse(AnalyticsBaseModel):
     union_tools: list[str] = Field(default_factory=list)
 
 
+class RagCitationResponse(AnalyticsBaseModel):
+    source_type: str
+    source_ref: str
+    source_title: Optional[str] = None
+    snippet: Optional[str] = None
+    score: Optional[float] = None
+
+
+class RagToolTraceResponse(AnalyticsBaseModel):
+    tool_name: str
+    context_key: str
+    category: str
+    status: str
+    duration_ms: Optional[int] = None
+    cache_hit: bool = False
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    result_summary: dict[str, Any] = Field(default_factory=dict)
+    error_text: Optional[str] = None
+
+
+class RagCacheMetadataResponse(AnalyticsBaseModel):
+    enabled: bool = False
+    hits: int = 0
+    misses: int = 0
+    writes: int = 0
+
+
 class RagConversationMessageResponse(AnalyticsBaseModel):
     message_id: str
     role: str
@@ -209,4 +236,7 @@ class RagAnswerResponse(AnalyticsBaseModel):
     plan: list[str] = Field(default_factory=list)
     tool_selection: RagToolSelectionResponse = Field(default_factory=RagToolSelectionResponse)
     context: dict[str, Any] = Field(default_factory=dict)
+    citations: list[RagCitationResponse] = Field(default_factory=list)
+    tool_traces: list[RagToolTraceResponse] = Field(default_factory=list)
+    cache: RagCacheMetadataResponse = Field(default_factory=RagCacheMetadataResponse)
     answer: str
