@@ -13,12 +13,21 @@ def _env_flag(name: str, default: bool) -> bool:
     return raw_value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_csv(name: str) -> tuple[str, ...]:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return ()
+    return tuple(item.strip() for item in raw_value.split(",") if item.strip())
+
+
 @dataclass(frozen=True)
 class Settings:
     spring_boot_base_url: str
     request_timeout_seconds: float
     log_level: str
     log_format: str
+    cors_enabled: bool
+    cors_allowed_origins: tuple[str, ...]
     openai_api_key: Optional[str]
     openai_chat_model: str
     mysql_host: Optional[str]
@@ -43,6 +52,8 @@ def get_settings() -> Settings:
         request_timeout_seconds=float(os.getenv("HTTP_TIMEOUT_SECONDS", "10")),
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
         log_format=os.getenv("LOG_FORMAT", "text").lower(),
+        cors_enabled=_env_flag("CORS_ENABLED", default=False),
+        cors_allowed_origins=_env_csv("CORS_ALLOWED_ORIGINS"),
         openai_api_key=os.getenv("OPENAI_API_KEY") or None,
         openai_chat_model=os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini"),
         mysql_host=os.getenv("MYSQL_HOST") or None,

@@ -11,6 +11,29 @@ class SettingsTests(unittest.TestCase):
     def tearDown(self) -> None:
         get_settings.cache_clear()
 
+    def test_cors_settings_default_to_disabled_with_no_origins(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            get_settings.cache_clear()
+            settings = get_settings()
+
+        self.assertFalse(settings.cors_enabled)
+        self.assertEqual(settings.cors_allowed_origins, ())
+
+    def test_cors_settings_load_from_environment(self) -> None:
+        env = {
+            "CORS_ENABLED": "true",
+            "CORS_ALLOWED_ORIGINS": "http://localhost:3000, http://127.0.0.1:3000 , https://example.com",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            get_settings.cache_clear()
+            settings = get_settings()
+
+        self.assertTrue(settings.cors_enabled)
+        self.assertEqual(
+            settings.cors_allowed_origins,
+            ("http://localhost:3000", "http://127.0.0.1:3000", "https://example.com"),
+        )
+
     def test_mysql_and_conversation_settings_load_from_environment(self) -> None:
         env = {
             "MYSQL_HOST": "db.example.com",

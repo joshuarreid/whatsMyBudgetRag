@@ -52,6 +52,8 @@ SPRING_BOOT_BASE_URL=http://springboot-api
 HTTP_TIMEOUT_SECONDS=10
 LOG_LEVEL=INFO
 LOG_FORMAT=text
+CORS_ENABLED=false
+CORS_ALLOWED_ORIGINS=
 OPENAI_API_KEY=
 OPENAI_CHAT_MODEL=gpt-4o-mini
 MYSQL_HOST=
@@ -73,6 +75,8 @@ Notes:
 - `SPRING_BOOT_BASE_URL` should point at the Spring Boot service.
 - `LOG_LEVEL` controls application and request logging verbosity.
 - `LOG_FORMAT` accepts `text` or `json` for human-readable or structured logs.
+- `CORS_ENABLED` toggles FastAPI CORS middleware on or off.
+- `CORS_ALLOWED_ORIGINS` accepts a comma-separated list of allowed browser origins when CORS is enabled.
 - If `OPENAI_API_KEY` is unset, the `/rag/ask` endpoint still works and returns a deterministic summary from the fetched API context.
 - `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_DATABASE`, `MYSQL_USER`, and `MYSQL_PASSWORD` configure conversation history persistence in MySQL 8, including managed providers such as DigitalOcean.
 - `MYSQL_SSL_DISABLED=false` keeps TLS enabled for managed MySQL services; optionally set `MYSQL_SSL_CA` when your provider gives you a CA bundle path.
@@ -81,6 +85,15 @@ Notes:
 - Questions without an explicit or inferred time reference now fall back to the current statement period, formatted as `MonthYear` (for example `May2026`).
 - `INSIGHT_HIGH_SHARE_THRESHOLD` controls when concentration warnings are emitted.
 - `INSIGHT_OUTLIER_AMOUNT_THRESHOLD` controls the amount threshold for derived outlier flags.
+
+For local frontend development against a deployed API, a typical `.env` example is:
+
+```env
+CORS_ENABLED=true
+CORS_ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+```
+
+The natural-language endpoint remains `POST /rag/ask`, so browser clients should target `/rag/ask` rather than `/ask`.
 
 Outbound Spring Boot requests now automatically include `X-Transaction-ID` and `X-Request-ID`. If an inbound request provides `X-Transaction-ID`, that value is reused; otherwise the app falls back to the current request ID.
 
