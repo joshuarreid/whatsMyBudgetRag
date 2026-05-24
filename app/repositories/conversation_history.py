@@ -43,6 +43,8 @@ class ConversationMessageRecord:
     period_source: Optional[str]
     created_at: datetime
     db_id: Optional[int] = None
+    context_json: Optional[dict[str, Any]] = None
+    answer_json: Optional[dict[str, Any]] = None
 
 
 class ConversationHistoryRepository(Protocol):
@@ -290,7 +292,7 @@ class MySQLConversationHistoryRepository:
             try:
                 cursor.execute(
                     """
-                    SELECT m.message_uuid, m.role, m.content, m.period, m.period_source, m.created_at
+                    SELECT m.message_uuid, m.role, m.content, m.period, m.period_source, m.context_json, m.answer_json, m.created_at
                     FROM messages m
                     INNER JOIN conversations c ON c.id = m.conversation_id
                     WHERE c.conversation_uuid = %s AND c.status <> 'deleted' AND m.is_deleted = 0
@@ -719,6 +721,8 @@ class MySQLConversationHistoryRepository:
             content=row["content"],
             period=row.get("period"),
             period_source=row.get("period_source"),
+            context_json=MySQLConversationHistoryRepository._json_from_db_value(row.get("context_json")),
+            answer_json=MySQLConversationHistoryRepository._json_from_db_value(row.get("answer_json")),
             created_at=row["created_at"],
         )
 

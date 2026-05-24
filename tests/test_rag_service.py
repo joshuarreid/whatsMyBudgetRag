@@ -14,7 +14,7 @@ class RAGServicePeriodResolutionTests(unittest.TestCase):
         self.spring = Mock()
         self.service = RAGService(self.spring, Mock(), None)
 
-    def test_explicit_request_period_wins(self) -> None:
+    def test_explicit_question_period_overrides_requested_period(self) -> None:
         resolved_period, interpretation = self.service._resolve_period(
             question="What was my spend in October?",
             period="February2026",
@@ -22,8 +22,8 @@ class RAGServicePeriodResolutionTests(unittest.TestCase):
             today=date(2026, 5, 22),
         )
 
-        self.assertEqual(resolved_period, "February2026")
-        self.assertEqual(interpretation["source"], "request_parameter")
+        self.assertEqual(resolved_period, "October2025")
+        self.assertEqual(interpretation["source"], "question_bare_month")
 
     def test_bare_month_resolves_to_most_recent_matching_period(self) -> None:
         resolved_period, interpretation = self.service._resolve_period(
@@ -90,6 +90,138 @@ class RAGServicePeriodResolutionTests(unittest.TestCase):
         self.assertEqual(resolved_period, "May2026")
         self.assertEqual(interpretation["source"], "current_statement_period_fallback")
         self.assertEqual(self.spring.get_periods.call_count, 0)
+
+    def test_prior_conversation_period_is_used_when_question_has_no_time_reference(self) -> None:
+        resolved_period, interpretation = self.service._resolve_period(
+            question="What about categories?",
+            period=None,
+            transaction_id=None,
+            conversation_history=[
+                ConversationMessageRecord(
+                    message_id="msg-1",
+                    role="assistant",
+                    content="December answer",
+                    period="December2025",
+                    period_source="question_bare_month",
+                    created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+                )
+            ],
+            today=date(2026, 5, 22),
+        )
+
+        self.assertEqual(resolved_period, "December2025")
+        self.assertEqual(interpretation["source"], "conversation_history_period")
+
+    def test_requested_period_is_used_when_question_and_conversation_have_no_period(self) -> None:
+        resolved_period, interpretation = self.service._resolve_period(
+            question="What was my total spend?",
+            period="May2026",
+            transaction_id=None,
+            conversation_history=[],
+            today=date(2026, 5, 22),
+        )
+
+        self.assertEqual(resolved_period, "May2026")
+        self.assertEqual(interpretation["source"], "request_parameter")
+
+
+class RAGServiceAccountResolutionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.spring = Mock()
+        self.service = RAGService(self.spring, Mock(), None)
+
+    def _assistant_message(self, *, account: str, period: str = "May2026") -> ConversationMessageRecord:
+        return ConversationMessageRecord(
+            message_id="msg-assistant",
+            role="assistant",
+            content="Stored answer",
+            period=period,
+            period_source="request_parameter",
+            context_json={
+                "filters": {
+                    "payment_method": None,
+                    "account": account,
+                }
+            },
+            answer_json={
+                "resolved_filters": {
+                    "payment_method": None,
+                    "account": account,
+                }
+            },
+            created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+        )
+
+    def test_explicit_question_account_overrides_request_and_history(self) -> None:
+        resolved_account, interpretation = self.service._resolve_account(
+            question="What was my spend on Checking account?",
+            account="Savings",
+            conversation_history=[self._assistant_message(account="Travel Card")],
+        )
+
+        self.assertEqual(resolved_account, "Checking")
+        self.assertEqual(interpretation["source"], "question_explicit_account")
+
+    def test_this_account_reuses_last_conversation_account(self) -> None:
+        resolved_account, interpretation = self.service._resolve_account(
+            question="What about this account?",
+            account="Savings",
+            conversation_history=[self._assistant_message(account="Travel Card")],
+        )
+
+        self.assertEqual(resolved_account, "Travel Card")
+        self.assertEqual(interpretation["source"], "question_contextual_account_reference")
+
+    def test_prior_conversation_account_is_used_for_follow_up_without_new_account(self) -> None:
+        resolved_account, interpretation = self.service._resolve_account(
+            question="Which categories drove spending?",
+            account=None,
+            conversation_history=[self._assistant_message(account="Travel Card")],
+        )
+
+        self.assertEqual(resolved_account, "Travel Card")
+        self.assertEqual(interpretation["source"], "conversation_history_account")
+
+    def test_this_account_uses_request_account_when_conversation_has_no_account(self) -> None:
+        resolved_account, interpretation = self.service._resolve_account(
+            question="What about this account?",
+            account="Savings",
+            conversation_history=[],
+        )
+
+        self.assertEqual(resolved_account, "Savings")
+        self.assertEqual(interpretation["source"], "question_contextual_request_account")
+
+    def test_generic_account_questions_do_not_create_false_positive_account_filters(self) -> None:
+        resolved_account, interpretation = self.service._resolve_account(
+            question="Give me an account breakdown for this period.",
+            account=None,
+            conversation_history=[],
+        )
+
+        self.assertIsNone(resolved_account)
+        self.assertEqual(interpretation["source"], "no_account_filter")
+
+
+class RAGServiceIntentDependencyTests(unittest.TestCase):
+    def test_classify_intent_uses_dedicated_intent_service_when_available(self) -> None:
+        spring = Mock()
+        registry = Mock()
+        registry.available_skills.return_value = [{"skill_id": "overview"}]
+        llm = Mock()
+        llm.classify_intent.return_value = None
+        intent_service = Mock()
+        intent_service.classify_intent.return_value = SimpleNamespace(skill_ids=["overview"])
+        service = RAGService(spring, registry, llm, None, intent_service=intent_service)
+
+        intent = service._classify_intent("What did I spend?")
+
+        self.assertEqual(intent.skill_ids, ["overview"])
+        intent_service.classify_intent.assert_called_once_with(
+            question="What did I spend?",
+            available_skills=[{"skill_id": "overview"}],
+        )
+        llm.classify_intent.assert_not_called()
 
 
 class RAGServiceConversationHistoryTests(unittest.TestCase):
@@ -230,6 +362,71 @@ class RAGServiceConversationHistoryTests(unittest.TestCase):
         self.history.create_conversation.assert_not_called()
         self.history.list_messages.assert_called_once_with("conv-456", limit=self.service.conversation_history_context_limit)
         self.assertEqual(response.context["conversation_history"][0]["content"], "How much did I spend yesterday?")
+
+    def test_answer_reuses_last_period_and_account_for_follow_up_without_new_filters(self) -> None:
+        self.history.get_conversation.return_value = ConversationRecord(
+            conversation_id="conv-sticky",
+            title="Sticky chat",
+            created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+            last_message_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+        )
+        self.history.list_messages.return_value = [
+            ConversationMessageRecord(
+                message_id="msg-previous-assistant",
+                role="assistant",
+                content="Stored December answer",
+                period="December2025",
+                period_source="question_bare_month",
+                context_json={
+                    "filters": {
+                        "payment_method": None,
+                        "account": "Travel Card",
+                    }
+                },
+                answer_json={
+                    "resolved_filters": {
+                        "payment_method": None,
+                        "account": "Travel Card",
+                    }
+                },
+                created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+            )
+        ]
+        self.history.append_message.side_effect = [
+            ConversationMessageRecord(
+                message_id="msg-user",
+                role="user",
+                content="What about categories?",
+                period=None,
+                period_source=None,
+                created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+            ),
+            ConversationMessageRecord(
+                db_id=101,
+                message_id="msg-assistant",
+                role="assistant",
+                content="Stored answer",
+                period="December2025",
+                period_source="conversation_history_period",
+                created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+            ),
+        ]
+
+        response = self.service.answer(
+            question="What about categories?",
+            conversation_id="conv-sticky",
+            period="May2026",
+            account="Savings",
+        )
+
+        request = self.registry.execute.call_args.args[1]
+        self.assertEqual(request.period, "December2025")
+        self.assertEqual(request.account, "Travel Card")
+        self.assertEqual(response.period, "December2025")
+        assistant_call = self.history.append_message.call_args_list[1]
+        self.assertEqual(assistant_call.kwargs["period"], "December2025")
+        self.assertEqual(assistant_call.kwargs["answer_json"]["resolved_filters"]["account"], "Travel Card")
 
     def test_answer_uses_conversation_cache_for_repeated_tool_requests(self) -> None:
         self.history.create_conversation.return_value = ConversationRecord(

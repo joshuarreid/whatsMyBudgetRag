@@ -14,6 +14,7 @@ from app.repositories import (
 )
 from app.services.analytics_service import AnalyticsService
 from app.services.insight_service import InsightService
+from app.services.intent_service import IntentService
 from app.services.llm_service import LLMService
 from app.services.rag_service import RAGService
 from app.skills.factories import build_skill_registry
@@ -33,8 +34,9 @@ def get_rag_service() -> RAGService:
     insights = InsightService(client, analytics)
     skill_registry = build_skill_registry(client, analytics, insights)
     llm_service = LLMService()
+    intent_service = IntentService()
     history_repository = get_conversation_history_repository()
-    return RAGService(client, skill_registry, llm_service, history_repository)
+    return RAGService(client, skill_registry, llm_service, history_repository, intent_service=intent_service)
 
 
 @router.post("/ask", response_model=RagAnswerResponse)

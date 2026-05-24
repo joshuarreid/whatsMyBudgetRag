@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import re
 from datetime import date
 from typing import Any, Optional
 
@@ -26,6 +25,7 @@ from app.repositories import (
     ConversationNotFoundError,
     NullConversationHistoryRepository,
 )
+from app.services.intent_service import IntentService
 from app.skills.base import Skill, SkillRequest
 from app.skills.registry import SkillRegistry
 
@@ -33,37 +33,6 @@ logger = logging.getLogger(__name__)
 
 TOOL_CACHE_TTL_SECONDS = 900
 MAX_RESPONSE_CITATIONS = 5
-
-STATEMENT_PERIOD_MONTHS = (
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
-)
-STATEMENT_PERIOD_MONTH_PATTERN = "|".join(STATEMENT_PERIOD_MONTHS)
-STATEMENT_PERIOD_MONTH_LOOKUP: dict[str, int] = {
-    month.lower(): index for index, month in enumerate(STATEMENT_PERIOD_MONTHS, start=1)
-}
-EXPLICIT_STATEMENT_PERIOD_PATTERN = re.compile(
-    rf"\b(?P<month>{STATEMENT_PERIOD_MONTH_PATTERN})\s*(?P<year>\d{{4}})\b",
-    re.IGNORECASE,
-)
-CONTEXTUAL_MONTH_PATTERN = re.compile(
-    rf"\b(?:in|for|during|on|from)\s+(?:the\s+month\s+of\s+)?(?P<month>{STATEMENT_PERIOD_MONTH_PATTERN})\b",
-    re.IGNORECASE,
-)
-MONTH_OF_PATTERN = re.compile(
-    rf"\bmonth\s+of\s+(?P<month>{STATEMENT_PERIOD_MONTH_PATTERN})\b",
-    re.IGNORECASE,
-)
 
 
 class RAGService:
@@ -75,10 +44,13 @@ class RAGService:
         skill_registry: SkillRegistry,
         llm_service: Optional[Any] = None,
         conversation_history: Optional[ConversationHistoryRepository] = None,
+        intent_service: Optional[Any] = None,
     ) -> None:
         self.spring = spring_client
         self.skill_registry = skill_registry
         self.llm = llm_service
+        self.intent_service = intent_service
+        self.intent_parser = intent_service or IntentService(enable_llm=False)
         settings = get_settings()
         self.conversation_history = conversation_history or NullConversationHistoryRepository()
         self.conversation_history_context_limit = settings.conversation_history_context_limit
@@ -111,31 +83,43 @@ class RAGService:
                 content=question,
                 transaction_id=transaction_id,
             )
+            llm_intent = self._classify_intent(question)
             selected_period, period_interpretation = self._resolve_period(
                 question=question,
                 period=period,
                 transaction_id=transaction_id,
+                conversation_history=prior_messages,
+                llm_intent=llm_intent,
             )
-            selected_skills, routing_metadata = self._select_skills(question)
+            selected_account, account_interpretation = self._resolve_account(
+                question=question,
+                account=account,
+                conversation_history=prior_messages,
+                llm_intent=llm_intent,
+            )
+            selected_skills, routing_metadata = self._select_skills(question, llm_intent=llm_intent)
             plan = [skill.skill_id for skill in selected_skills]
             logger.info(
-                "RAG execution plan selected period=%s plan=%s period_source=%s routing_source=%s",
+                "RAG execution plan selected period=%s account=%s plan=%s period_source=%s account_source=%s routing_source=%s",
                 selected_period,
+                selected_account or "-",
                 plan,
                 period_interpretation.get("source", "unknown"),
+                account_interpretation.get("source", "unknown"),
                 routing_metadata.get("source", "unknown"),
             )
             skill_request = SkillRequest(
                 question=question,
                 period=selected_period,
                 payment_method=payment_method,
-                account=account,
+                account=selected_account,
                 transaction_id=transaction_id,
             )
             context, tool_traces, response_citations, cache_metadata = self._build_context(
                 skill_request=skill_request,
                 plan=plan,
                 period_interpretation=period_interpretation,
+                account_interpretation=account_interpretation,
                 skills=selected_skills,
                 routing_metadata=routing_metadata,
                 conversation_id=resolved_conversation_id,
@@ -157,6 +141,14 @@ class RAGService:
                     "question": question,
                     "conversation_id": resolved_conversation_id,
                     "period": selected_period,
+                    "period_source": period_interpretation.get("source"),
+                    "resolved_filters": {
+                        "payment_method": payment_method,
+                        "account": selected_account,
+                    },
+                    "filter_interpretation": {
+                        "account": account_interpretation,
+                    },
                     "plan": plan,
                     "tool_selection": routing_metadata.get("tool_selection", {}),
                     "citations": response_citations,
@@ -222,18 +214,16 @@ class RAGService:
         period: Optional[str],
         transaction_id: Optional[str],
         *,
+        conversation_history: Optional[list[ConversationMessageRecord]] = None,
+        llm_intent: Optional[RagIntentResponse] = None,
         today: Optional[date] = None,
     ) -> tuple[str, dict[str, str]]:
         reference_date = today or date.today()
-        if period:
-            logger.debug("Using requested analytics period=%s", period)
-            return period, {
-                "source": "request_parameter",
-                "matched_text": period,
-                "resolved_period": period,
-            }
-
-        inferred_period = self._infer_period_from_question(question=question, today=reference_date)
+        inferred_period = self.intent_parser.infer_period(
+            question=question,
+            today=reference_date,
+            llm_intent=llm_intent,
+        )
         if inferred_period is not None:
             logger.debug(
                 "Resolved analytics period from question matched_text=%s resolved_period=%s",
@@ -242,7 +232,25 @@ class RAGService:
             )
             return inferred_period["resolved_period"], inferred_period
 
-        resolved_period = self._format_statement_period(reference_date)
+        prior_period = self._last_resolved_period(conversation_history)
+        if prior_period is not None:
+            logger.debug("Reusing prior conversation analytics period=%s", prior_period)
+            return prior_period, {
+                "source": "conversation_history_period",
+                "matched_text": prior_period,
+                "resolved_period": prior_period,
+                "resolution_rule": "follow-up questions without a new time reference reuse the last resolved statement period from the conversation",
+            }
+
+        if period:
+            logger.debug("Using requested analytics period=%s", period)
+            return period, {
+                "source": "request_parameter",
+                "matched_text": period,
+                "resolved_period": period,
+            }
+
+        resolved_period = self.intent_parser.format_statement_period(reference_date)
         logger.debug("Falling back to current statement period=%s", resolved_period)
         return resolved_period, {
             "source": "current_statement_period_fallback",
@@ -251,68 +259,68 @@ class RAGService:
             "resolution_rule": "questions without a time reference fall back to the current statement period",
         }
 
-    def _infer_period_from_question(self, question: str, today: date) -> Optional[dict[str, str]]:
-        lowered = question.lower()
-        current_statement_period = self._format_statement_period(today)
+    def _resolve_account(
+        self,
+        question: str,
+        account: Optional[str],
+        *,
+        conversation_history: Optional[list[ConversationMessageRecord]] = None,
+        llm_intent: Optional[RagIntentResponse] = None,
+    ) -> tuple[Optional[str], dict[str, Optional[str]]]:
+        inferred_account = self.intent_parser.infer_account(question=question, llm_intent=llm_intent)
+        prior_account = self._last_resolved_filter(conversation_history, "account")
 
-        explicit_period_match = EXPLICIT_STATEMENT_PERIOD_PATTERN.search(question)
-        if explicit_period_match:
-            resolved_period = self._format_statement_period(
-                date(
-                    int(explicit_period_match.group("year")),
-                    self._month_number(explicit_period_match.group("month")),
-                    1,
-                )
-            )
-            return {
-                "source": "question_explicit_period",
-                "matched_text": explicit_period_match.group(0),
-                "resolved_period": resolved_period,
-                "resolution_rule": "explicit MonthYear or Month YYYY reference from the question",
+        if inferred_account is not None and inferred_account.get("resolved_account"):
+            resolved_account = inferred_account["resolved_account"]
+            logger.debug("Resolved analytics account from question matched_text=%s resolved_account=%s", inferred_account.get("matched_text"), resolved_account)
+            return resolved_account, inferred_account
+
+        if inferred_account is not None and inferred_account.get("source") == "question_contextual_account_reference":
+            if prior_account:
+                return prior_account, {
+                    "source": "question_contextual_account_reference",
+                    "matched_text": inferred_account.get("matched_text"),
+                    "resolved_account": prior_account,
+                    "resolution_rule": "contextual references like this account reuse the last resolved account from the conversation",
+                }
+            if account:
+                return account, {
+                    "source": "question_contextual_request_account",
+                    "matched_text": inferred_account.get("matched_text"),
+                    "resolved_account": account,
+                    "resolution_rule": "contextual references like this account reuse the request account when the conversation has not resolved one yet",
+                }
+
+        if prior_account:
+            logger.debug("Reusing prior conversation analytics account=%s", prior_account)
+            return prior_account, {
+                "source": "conversation_history_account",
+                "matched_text": prior_account,
+                "resolved_account": prior_account,
+                "resolution_rule": "follow-up questions without a new account reference reuse the last resolved account from the conversation",
             }
 
-        if "this period" in lowered or "current period" in lowered:
-            return {
-                "source": "question_current_period",
-                "matched_text": "this period" if "this period" in lowered else "current period",
-                "resolved_period": current_statement_period,
-                "resolution_rule": "current statement period implied by the question",
+        if account:
+            logger.debug("Using requested analytics account=%s", account)
+            return account, {
+                "source": "request_parameter",
+                "matched_text": account,
+                "resolved_account": account,
             }
 
-        if "this month" in lowered or "current month" in lowered:
-            return {
-                "source": "question_current_month",
-                "matched_text": "this month" if "this month" in lowered else "current month",
-                "resolved_period": current_statement_period,
-                "resolution_rule": "current month resolves to the current statement period",
-            }
-
-        if "last month" in lowered or "previous month" in lowered:
-            matched_text = "last month" if "last month" in lowered else "previous month"
-            return {
-                "source": "question_relative_month",
-                "matched_text": matched_text,
-                "resolved_period": self._format_statement_period(self._shift_month(today, offset=-1)),
-                "resolution_rule": "relative month resolves from the current statement period",
-            }
-
-        contextual_month_match = CONTEXTUAL_MONTH_PATTERN.search(question) or MONTH_OF_PATTERN.search(question)
-        if contextual_month_match:
-            matched_month = contextual_month_match.group("month")
-            return {
-                "source": "question_bare_month",
-                "matched_text": matched_month,
-                "resolved_period": self._resolve_recent_month_reference(matched_month, today),
-                "resolution_rule": "bare month names resolve to the most recent matching statement period not in the future",
-            }
-
-        return None
+        return None, {
+            "source": "no_account_filter",
+            "matched_text": None,
+            "resolved_account": None,
+            "resolution_rule": "questions without an account reference or prior account context do not apply an account filter",
+        }
 
     def _build_context(
         self,
         skill_request: SkillRequest,
         plan: list[str],
         period_interpretation: dict[str, str],
+        account_interpretation: dict[str, Optional[str]],
         skills: list[Skill],
         routing_metadata: dict[str, Any],
         *,
@@ -332,6 +340,9 @@ class RAGService:
             },
             "timeline_context": timeline_context,
             "period_interpretation": period_interpretation,
+            "filter_interpretation": {
+                "account": account_interpretation,
+            },
             "skills": {
                 "selected": plan,
                 "count": len(plan),
@@ -351,6 +362,7 @@ class RAGService:
                     "content": message.content,
                     "period": message.period,
                     "period_source": message.period_source,
+                    "filters": self._message_resolved_filters(message),
                     "created_at": message.created_at.isoformat(),
                 }
                 for message in conversation_history
@@ -374,8 +386,12 @@ class RAGService:
 
         return context, tool_traces, response_citations, cache_metadata
 
-    def _select_skills(self, question: str) -> tuple[list[Skill], dict[str, Any]]:
-        llm_intent = self._classify_intent(question)
+    def _select_skills(
+        self,
+        question: str,
+        *,
+        llm_intent: Optional[RagIntentResponse] = None,
+    ) -> tuple[list[Skill], dict[str, Any]]:
         llm_selected_skills = self.skill_registry.resolve(llm_intent.skill_ids) if llm_intent is not None else []
         deterministic_skills = self.skill_registry.select(question)
         tool_selection = {
@@ -405,11 +421,15 @@ class RAGService:
         }
 
     def _classify_intent(self, question: str) -> Optional[RagIntentResponse]:
-        if self.llm is None or not hasattr(self.llm, "classify_intent"):
+        service = self.intent_service
+        if service is None and self.llm is not None and hasattr(self.llm, "classify_intent"):
+            service = self.llm
+
+        if service is None or not hasattr(service, "classify_intent"):
             return None
 
         try:
-            return self.llm.classify_intent(
+            return service.classify_intent(
                 question=question,
                 available_skills=self.skill_registry.available_skills(),
             )
@@ -437,7 +457,7 @@ class RAGService:
         today: Optional[date] = None,
     ) -> dict[str, Any]:
         reference_date = today or date.today()
-        current_statement_period = self._format_statement_period(reference_date)
+        current_statement_period = self.intent_parser.format_statement_period(reference_date)
         return {
             "current_date": reference_date.isoformat(),
             "current_month": current_statement_period,
@@ -452,29 +472,6 @@ class RAGService:
             },
             "selection_source": period_interpretation.get("source", "unknown"),
         }
-
-    @staticmethod
-    def _month_number(month_text: str) -> int:
-        month_number = STATEMENT_PERIOD_MONTH_LOOKUP.get(month_text.lower())
-        if month_number is None:
-            raise ValueError(f"Unsupported statement period month: {month_text}")
-        return month_number
-
-    @staticmethod
-    def _format_statement_period(reference_date: date) -> str:
-        return reference_date.strftime("%B%Y")
-
-    @staticmethod
-    def _shift_month(reference_date: date, offset: int) -> date:
-        target_index = reference_date.month - 1 + offset
-        target_year = reference_date.year + (target_index // 12)
-        target_month = (target_index % 12) + 1
-        return date(target_year, target_month, 1)
-
-    def _resolve_recent_month_reference(self, month_text: str, today: date) -> str:
-        target_month = self._month_number(month_text)
-        target_year = today.year if target_month <= today.month else today.year - 1
-        return self._format_statement_period(date(target_year, target_month, 1))
 
     def _prepare_conversation(
         self,
@@ -500,6 +497,50 @@ class RAGService:
             limit=self.conversation_history_context_limit,
         )
         return conversation_id, messages
+
+    @staticmethod
+    def _last_resolved_period(
+        conversation_history: Optional[list[ConversationMessageRecord]],
+    ) -> Optional[str]:
+        if not conversation_history:
+            return None
+        for message in reversed(conversation_history):
+            if message.role != "assistant":
+                continue
+            if isinstance(message.period, str) and message.period.strip():
+                return message.period.strip()
+        return None
+
+    def _last_resolved_filter(
+        self,
+        conversation_history: Optional[list[ConversationMessageRecord]],
+        filter_name: str,
+    ) -> Optional[str]:
+        if not conversation_history:
+            return None
+        for message in reversed(conversation_history):
+            if message.role != "assistant":
+                continue
+            resolved_filters = self._message_resolved_filters(message)
+            filter_value = resolved_filters.get(filter_name)
+            if isinstance(filter_value, str) and filter_value.strip():
+                return filter_value.strip()
+        return None
+
+    @staticmethod
+    def _message_resolved_filters(message: ConversationMessageRecord) -> dict[str, Any]:
+        answer_json = message.answer_json if isinstance(message.answer_json, dict) else {}
+        resolved_filters = answer_json.get("resolved_filters")
+        if isinstance(resolved_filters, dict):
+            return resolved_filters
+
+        context_json = message.context_json if isinstance(message.context_json, dict) else {}
+        context_filters = context_json.get("filters")
+        if isinstance(context_filters, dict):
+            return context_filters
+
+        fallback_filters = answer_json.get("filters")
+        return fallback_filters if isinstance(fallback_filters, dict) else {}
 
     def _persist_message(
         self,
