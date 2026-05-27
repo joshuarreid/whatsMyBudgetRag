@@ -10,6 +10,7 @@ from app.models.schemas import (
     AnalyticsDuplicateResponse,
     AnalyticsPaymentMethodBreakdownResponse,
     AnalyticsPeriodsResponse,
+    AnalyticsStatementPeriodSummaryResponse,
     BudgetTransactionResponse,
 )
 
@@ -34,6 +35,7 @@ def normalize_list_response(
             AnalyticsDailyTotalResponse,
             AnalyticsCriticalityBreakdownResponse,
             AnalyticsDuplicateResponse,
+            AnalyticsStatementPeriodSummaryResponse,
             BudgetTransactionResponse,
         ]
     ],
@@ -45,6 +47,7 @@ def normalize_list_response(
         AnalyticsDailyTotalResponse,
         AnalyticsCriticalityBreakdownResponse,
         AnalyticsDuplicateResponse,
+        AnalyticsStatementPeriodSummaryResponse,
         BudgetTransactionResponse,
     ]
 ]:

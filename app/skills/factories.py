@@ -5,6 +5,7 @@ from app.services.analytics_service import AnalyticsService
 from app.services.insight_service import InsightService
 from app.skills.analytics import (
     AccountBreakdownSkill,
+    AvailablePeriodsSkill,
     CategoriesSkill,
     CriticalitySkill,
     DailyTotalsSkill,
@@ -12,6 +13,8 @@ from app.skills.analytics import (
     OutliersSkill,
     OverviewSkill,
     PaymentMethodsSkill,
+    StatementPeriodSummaryRangeSkill,
+    StatementPeriodSummarySkill,
     TopCategoriesSkill,
     UncategorizedSkill,
 )
@@ -31,6 +34,7 @@ def build_skill_registry(
 ) -> SkillRegistry:
     return SkillRegistry(
         skills=[
+            AvailablePeriodsSkill(spring_client),
             OverviewSkill(analytics_service),
             CategoriesSkill(spring_client),
             TopCategoriesSkill(spring_client),
@@ -45,6 +49,8 @@ def build_skill_registry(
             DuplicatesSkill(spring_client),
             UncategorizedSkill(spring_client),
             OutliersSkill(spring_client),
+            StatementPeriodSummarySkill(spring_client),
+            StatementPeriodSummaryRangeSkill(spring_client),
         ]
     )
 

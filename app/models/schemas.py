@@ -159,6 +159,36 @@ class BudgetTransactionResponse(AnalyticsBaseModel):
     row_hash: Optional[str] = Field(default=None, alias="rowHash")
 
 
+class AnalyticsStatementPeriodSummaryResponse(AnalyticsBaseModel):
+    statement_period: str = Field(alias="statementPeriod")
+    period_start_date: Optional[date] = Field(default=None, alias="periodStartDate")
+    period_end_date: Optional[date] = Field(default=None, alias="periodEndDate")
+    total_amount: Decimal = Field(alias="totalAmount")
+    transaction_count: int = Field(alias="transactionCount")
+    essential_amount: Decimal = Field(alias="essentialAmount")
+    essential_count: int = Field(alias="essentialCount")
+    nonessential_amount: Decimal = Field(alias="nonessentialAmount")
+    nonessential_count: int = Field(alias="nonessentialCount")
+    category_breakdown: dict[str, list[AnalyticsCategoryBreakdownResponse]] = Field(
+        default_factory=dict,
+        alias="categoryBreakdown",
+    )
+    criticality_breakdown: dict[str, list[AnalyticsCriticalityBreakdownResponse]] = Field(
+        default_factory=dict,
+        alias="criticalityBreakdown",
+    )
+    account_breakdown: dict[str, AnalyticsAccountBreakdownResponse] = Field(
+        default_factory=dict,
+        alias="accountBreakdown",
+    )
+    payment_method_breakdown: dict[str, list[AnalyticsPaymentMethodBreakdownResponse]] = Field(
+        default_factory=dict,
+        alias="paymentMethodBreakdown",
+    )
+    outliers: dict[str, list[BudgetTransactionResponse]] = Field(default_factory=dict)
+    generated_at: datetime = Field(alias="generatedAt")
+
+
 class InsightMetric(AnalyticsBaseModel):
     label: str
     value: Union[Decimal, int, str]

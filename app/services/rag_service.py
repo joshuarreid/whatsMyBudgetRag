@@ -375,13 +375,16 @@ class RAGService:
         conversation_id: Optional[str] = None,
         conversation_history: Optional[list[ConversationMessageRecord]] = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+        if skill_request.time_scope is None:
+            raise ValueError("RAG context building requires a resolved time_scope")
+        resolved_time_scope = skill_request.time_scope
         timeline_context = self._build_timeline_context(
-            time_scope=skill_request.time_scope,
+            time_scope=resolved_time_scope,
             period_interpretation=period_interpretation,
         )
         context: dict[str, Any] = {
             "question": skill_request.question,
-            "time_scope": skill_request.time_scope.model_dump(mode="json", exclude_none=True),
+            "time_scope": resolved_time_scope.model_dump(mode="json", exclude_none=True),
             "period": skill_request.period,
             "filters": {
                 "payment_method": skill_request.payment_method,
@@ -960,6 +963,33 @@ class RAGService:
             highlights = month_over_month.get("highlights")
             if isinstance(highlights, list) and highlights:
                 fragments.append(str(highlights[0]))
+
+        available_periods = context.get("available_periods")
+        if isinstance(available_periods, dict):
+            periods = available_periods.get("periods")
+            count = available_periods.get("count")
+            if isinstance(periods, list) and periods:
+                preview = ", ".join(str(period) for period in periods[:5])
+                if count is not None:
+                    fragments.append(f"There are {count} available statement periods. Examples: {preview}.")
+                else:
+                    fragments.append(f"Available statement periods include: {preview}.")
+
+        statement_period_summary = context.get("statement_period_summary")
+        if isinstance(statement_period_summary, dict):
+            summary_period = statement_period_summary.get("statement_period")
+            total_amount = statement_period_summary.get("total_amount")
+            transaction_count = statement_period_summary.get("transaction_count")
+            if summary_period and total_amount is not None:
+                fragments.append(f"Statement period summary for {summary_period} shows total spend of {total_amount}.")
+            if transaction_count is not None:
+                fragments.append(f"That summary includes {transaction_count} transactions.")
+
+        statement_period_summary_range = context.get("statement_period_summary_range")
+        if isinstance(statement_period_summary_range, list):
+            fragments.append(
+                f"Statement period summaries were included for {len(statement_period_summary_range)} periods in the selected range."
+            )
 
         if "categories" in context:
             fragments.append("Category breakdown data was included from Spring Boot analytics.")

@@ -10,7 +10,7 @@ class PeriodSummarySkill(Skill):
         category="insights",
         context_key="period_summary",
         description="Build a derived summary for the selected statement period.",
-        keywords=("summary", "summarize", "snapshot", "anomaly", "anomalies", "flag", "flags"),
+        keywords=("summarize", "snapshot", "anomaly", "anomalies", "flag", "flags", "behavior summary"),
     )
 
     def __init__(self, insight_service: InsightService) -> None:

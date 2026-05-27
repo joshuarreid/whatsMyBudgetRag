@@ -334,6 +334,50 @@ class SpringBootClient:
             transaction_id=transaction_id,
         )
 
+    def get_statement_period_summary(
+        self,
+        period: str,
+        transaction_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        return self._get_object(
+            f"/summaries/{period}",
+            transaction_id=transaction_id,
+        )
+
+    def get_statement_period_summaries(
+        self,
+        start_period: str,
+        end_period: str,
+        transaction_id: Optional[str] = None,
+    ) -> Union[list[dict[str, Any]], dict[str, Any]]:
+        return self._get_collection(
+            "/summaries",
+            params={
+                "startPeriod": start_period,
+                "endPeriod": end_period,
+            },
+            transaction_id=transaction_id,
+        )
+
+    def get_statement_period_summary_for_time_scope(
+        self,
+        time_scope: RagTimeScope,
+        transaction_id: Optional[str] = None,
+    ) -> Union[list[dict[str, Any]], dict[str, Any]]:
+        if time_scope.scope_type == "statement_period":
+            return self.get_statement_period_summary(
+                period=self._require_statement_period(time_scope),
+                transaction_id=transaction_id,
+            )
+        if time_scope.scope_type == "statement_period_range":
+            start_period, end_period = self._require_statement_period_range(time_scope)
+            return self.get_statement_period_summaries(
+                start_period=start_period,
+                end_period=end_period,
+                transaction_id=transaction_id,
+            )
+        raise ValueError(f"Unsupported time scope for statement-period summary endpoint: {time_scope.scope_type}")
+
     def get_overview_for_time_scope(
         self,
         time_scope: RagTimeScope,
@@ -554,6 +598,12 @@ class SpringBootClient:
         return time_scope.statement_period
 
     @staticmethod
+    def _require_statement_period_range(time_scope: RagTimeScope) -> tuple[str, str]:
+        if time_scope.scope_type != "statement_period_range" or not time_scope.start_period or not time_scope.end_period:
+            raise ValueError(f"Unsupported time scope for statement-period range endpoint: {time_scope.scope_type}")
+        return time_scope.start_period, time_scope.end_period
+
+    @staticmethod
     def _require_date_range(time_scope: RagTimeScope) -> tuple[date, date]:
         if time_scope.scope_type != "date_range" or time_scope.start_date is None or time_scope.end_date is None:
             raise ValueError(f"Unsupported time scope for date-range endpoint: {time_scope.scope_type}")
@@ -621,7 +671,7 @@ class SpringBootClient:
     ) -> dict[str, Any]:
         payload = self._get(path, params=params, transaction_id=transaction_id)
         if isinstance(payload, dict):
-            return payload
+            return cast(dict[str, Any], payload)
         raise ValueError(f"Expected object response payload from Spring Boot endpoint: {path}")
 
     def _get_collection(
@@ -632,7 +682,7 @@ class SpringBootClient:
     ) -> Union[list[dict[str, Any]], dict[str, Any]]:
         payload = self._get(path, params=params, transaction_id=transaction_id)
         if isinstance(payload, dict):
-            return payload
+            return cast(dict[str, Any], payload)
         if isinstance(payload, list) and all(isinstance(item, dict) for item in payload):
             return cast(list[dict[str, Any]], payload)
         raise ValueError(f"Expected collection response payload from Spring Boot endpoint: {path}")
