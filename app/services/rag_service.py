@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Optional
 
 from app.clients.spring_boot_client import SpringBootClient
@@ -378,6 +378,9 @@ class RAGService:
         if skill_request.time_scope is None:
             raise ValueError("RAG context building requires a resolved time_scope")
         resolved_time_scope = skill_request.time_scope
+        cache_enabled = conversation_id is not None and self.conversation_history.is_enabled()
+        cache_policy = self._cache_policy(resolved_time_scope, enabled=cache_enabled)
+        cache_allowed = cache_policy["eligible"]
         timeline_context = self._build_timeline_context(
             time_scope=resolved_time_scope,
             period_interpretation=period_interpretation,
@@ -425,8 +428,9 @@ class RAGService:
         skill_context, unavailable_skills, tool_traces = self.skill_registry.execute(
             skills,
             skill_request,
-            cache_lookup=(self._cache_lookup(conversation_id) if conversation_id is not None else None),
+            cache_lookup=(self._cache_lookup(conversation_id) if conversation_id is not None and cache_allowed else None),
         )
+        self._apply_cache_policy(tool_traces, cache_allowed=cache_allowed)
         context.update(skill_context)
 
         if unavailable_skills:
@@ -434,12 +438,19 @@ class RAGService:
             context["degraded"] = True
 
         response_citations = self._response_citations(tool_traces)
-        cache_metadata = self._cache_metadata(conversation_id, tool_traces)
+        cache_metadata = self._cache_metadata(tool_traces, cache_policy=cache_policy)
         context["supporting_sources"] = response_citations
         context["cache"] = cache_metadata
         context["tool_trace_summaries"] = [trace.model_dump(mode="json") for trace in self._response_tool_traces(tool_traces)]
 
         return context, tool_traces, response_citations, cache_metadata
+
+    def _apply_cache_policy(self, tool_traces: list[dict[str, Any]], *, cache_allowed: bool) -> None:
+        if cache_allowed:
+            return
+        for trace in tool_traces:
+            trace["cache_hit"] = False
+            trace["cacheable"] = False
 
     def _select_skills(
         self,
@@ -784,22 +795,31 @@ class RAGService:
             arguments = trace.get("arguments", {})
             if not isinstance(tool_name, str):
                 continue
+            cacheable_arguments = self._cacheable_arguments(arguments)
             cache_key = self._tool_cache_key(tool_name, arguments)
+            response_payload = {
+                "context_key": trace.get("context_key"),
+                "payload": trace.get("result"),
+                "metadata": {
+                    "citation": trace.get("citation"),
+                    "description": trace.get("description"),
+                },
+            }
             self.conversation_history.upsert_tool_cache(
                 conversation_id,
                 tool_name=tool_name,
                 cache_key=cache_key,
                 period=period,
-                params_json=self._cacheable_arguments(arguments),
-                response_json={
-                    "context_key": trace.get("context_key"),
-                    "payload": trace.get("result"),
-                    "metadata": {
-                        "citation": trace.get("citation"),
-                        "description": trace.get("description"),
-                    },
-                },
+                params_json=cacheable_arguments,
+                response_json=response_payload,
                 source_message_db_id=assistant_message.db_id,
+                ttl_seconds=TOOL_CACHE_TTL_SECONDS,
+            )
+            self.conversation_history.upsert_shared_tool_cache(
+                tool_name=tool_name,
+                cache_key=cache_key,
+                params_json=cacheable_arguments,
+                response_json=response_payload,
                 ttl_seconds=TOOL_CACHE_TTL_SECONDS,
             )
             writes += 1
@@ -817,6 +837,11 @@ class RAGService:
                 cache_key=cache_key,
             )
             if cached_entry is None:
+                cached_entry = self.conversation_history.get_shared_tool_cache(
+                    tool_name=skill.skill_id,
+                    cache_key=cache_key,
+                )
+            if cached_entry is None:
                 return None
             response_json = cached_entry.get("response_json")
             if not isinstance(response_json, dict):
@@ -830,6 +855,97 @@ class RAGService:
             }
 
         return lookup
+
+    def _is_cache_allowed_for_time_scope(
+        self,
+        time_scope: Optional[RagTimeScope],
+        *,
+        today: Optional[date] = None,
+    ) -> bool:
+        if time_scope is None:
+            return False
+
+        reference_date = today or date.today()
+        current_period = self.intent_parser.format_statement_period(reference_date)
+        current_month_start = reference_date.replace(day=1)
+
+        if time_scope.scope_type == "statement_period":
+            return bool(time_scope.statement_period and time_scope.statement_period != current_period)
+
+        if time_scope.scope_type == "statement_period_range":
+            start_period_date = self._statement_period_to_date(time_scope.start_period)
+            end_period_date = self._statement_period_to_date(time_scope.end_period)
+            if start_period_date is None or end_period_date is None:
+                return False
+            current_period_date = current_month_start
+            return not (start_period_date <= current_period_date <= end_period_date)
+
+        if time_scope.scope_type == "date_range":
+            if time_scope.start_date is None or time_scope.end_date is None:
+                return False
+            return time_scope.end_date < current_month_start
+
+        return False
+
+    def _cache_policy(
+        self,
+        time_scope: Optional[RagTimeScope],
+        *,
+        enabled: bool,
+        today: Optional[date] = None,
+    ) -> dict[str, Any]:
+        if not enabled:
+            return {
+                "enabled": False,
+                "eligible": False,
+                "reason": "cache_unavailable",
+            }
+
+        if time_scope is None:
+            return {
+                "enabled": True,
+                "eligible": False,
+                "reason": "missing_time_scope",
+            }
+
+        reference_date = today or date.today()
+        current_period = self.intent_parser.format_statement_period(reference_date)
+        current_month_start = reference_date.replace(day=1)
+
+        if time_scope.scope_type == "statement_period":
+            if not time_scope.statement_period:
+                return {"enabled": True, "eligible": False, "reason": "missing_statement_period"}
+            if time_scope.statement_period == current_period:
+                return {"enabled": True, "eligible": False, "reason": "current_month_not_cacheable"}
+            return {"enabled": True, "eligible": True, "reason": None}
+
+        if time_scope.scope_type == "statement_period_range":
+            start_period_date = self._statement_period_to_date(time_scope.start_period)
+            end_period_date = self._statement_period_to_date(time_scope.end_period)
+            if start_period_date is None or end_period_date is None:
+                return {"enabled": True, "eligible": False, "reason": "invalid_statement_period_range"}
+            if start_period_date <= current_month_start <= end_period_date:
+                return {"enabled": True, "eligible": False, "reason": "includes_current_month_not_cacheable"}
+            return {"enabled": True, "eligible": True, "reason": None}
+
+        if time_scope.scope_type == "date_range":
+            if time_scope.start_date is None or time_scope.end_date is None:
+                return {"enabled": True, "eligible": False, "reason": "invalid_date_range"}
+            if time_scope.end_date >= current_month_start:
+                return {"enabled": True, "eligible": False, "reason": "includes_current_month_not_cacheable"}
+            return {"enabled": True, "eligible": True, "reason": None}
+
+        return {"enabled": True, "eligible": False, "reason": f"unsupported_time_scope:{time_scope.scope_type}"}
+
+    @staticmethod
+    def _statement_period_to_date(period: Optional[str]) -> Optional[date]:
+        if not isinstance(period, str) or not period.strip():
+            return None
+        try:
+            return datetime.strptime(period.strip(), "%B%Y").date()
+        except ValueError:
+            logger.debug("Ignoring invalid statement period for cache policy period=%s", period)
+            return None
 
     @staticmethod
     def _cacheable_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -878,9 +994,11 @@ class RAGService:
             for trace in tool_traces
         ]
 
-    def _cache_metadata(self, conversation_id: Optional[str], tool_traces: list[dict[str, Any]]) -> dict[str, Any]:
+    def _cache_metadata(self, tool_traces: list[dict[str, Any]], *, cache_policy: dict[str, Any]) -> dict[str, Any]:
         return {
-            "enabled": conversation_id is not None and self.conversation_history.is_enabled(),
+            "enabled": bool(cache_policy.get("enabled", False)),
+            "eligible": bool(cache_policy.get("eligible", False)),
+            "reason": cache_policy.get("reason"),
             "hits": sum(1 for trace in tool_traces if trace.get("cache_hit")),
             "misses": sum(
                 1

@@ -1,5 +1,5 @@
 -- =========================================================
--- budget_rag: conversation history + tool cache + retention
+-- budget_rag: conversation history + tool caches + retention
 -- MySQL 8.0+
 -- =========================================================
 
@@ -165,7 +165,44 @@ CREATE TABLE IF NOT EXISTS conversation_tool_cache (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- -----------------------------
--- 6) Optional view for timeline replay
+-- 6) Shared tool-result cache
+-- -----------------------------
+CREATE TABLE IF NOT EXISTS tool_result_cache (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  tool_name VARCHAR(128) NOT NULL,
+  cache_key CHAR(64) NOT NULL,
+  scope_type VARCHAR(64) NULL,
+  statement_period VARCHAR(32) NULL,
+  start_period VARCHAR(32) NULL,
+  end_period VARCHAR(32) NULL,
+  start_date DATE NULL,
+  end_date DATE NULL,
+  account VARCHAR(128) NULL,
+  payment_method VARCHAR(128) NULL,
+  params_json JSON NOT NULL,
+  response_json JSON NOT NULL,
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+  expires_at DATETIME(6) NULL,
+  invalidated_at DATETIME(6) NULL,
+  hit_count INT UNSIGNED NOT NULL DEFAULT 0,
+  last_hit_at DATETIME(6) NULL,
+
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_tool_result_cache (tool_name, cache_key),
+  KEY idx_tool_result_cache_lookup (tool_name, expires_at, invalidated_at),
+  KEY idx_tool_result_cache_scope_period (scope_type, statement_period),
+  KEY idx_tool_result_cache_scope_dates (scope_type, start_date, end_date),
+  KEY idx_tool_result_cache_account (account),
+  KEY idx_tool_result_cache_payment_method (payment_method),
+  KEY idx_tool_result_cache_expiry (expires_at),
+
+  CONSTRAINT chk_tool_result_cache_params_json CHECK (JSON_VALID(params_json)),
+  CONSTRAINT chk_tool_result_cache_response_json CHECK (JSON_VALID(response_json))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- -----------------------------
+-- 7) Optional view for timeline replay
 -- -----------------------------
 CREATE OR REPLACE VIEW v_conversation_messages AS
 SELECT
@@ -187,7 +224,7 @@ JOIN messages m ON m.conversation_id = c.id
 WHERE m.is_deleted = 0;
 
 -- -----------------------------
--- 7) 30-day retention event
+-- 8) 30-day retention event
 -- -----------------------------
 -- Requires EVENT privilege. The server administrator must enable the event scheduler
 -- outside this script if it is disabled (for example in my.cnf or with a privileged
@@ -204,6 +241,12 @@ DO
 BEGIN
   -- Cache cleanup
   DELETE FROM conversation_tool_cache
+  WHERE
+    invalidated_at IS NOT NULL
+    OR (expires_at IS NOT NULL AND expires_at < UTC_TIMESTAMP(6))
+    OR created_at < (UTC_TIMESTAMP(6) - INTERVAL 30 DAY);
+
+  DELETE FROM tool_result_cache
   WHERE
     invalidated_at IS NOT NULL
     OR (expires_at IS NOT NULL AND expires_at < UTC_TIMESTAMP(6))

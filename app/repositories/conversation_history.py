@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional, Protocol
 from uuid import uuid4
 
@@ -112,6 +112,23 @@ class ConversationHistoryRepository(Protocol):
         ttl_seconds: Optional[int] = None,
     ) -> None: ...
 
+    def get_shared_tool_cache(
+        self,
+        *,
+        tool_name: str,
+        cache_key: str,
+    ) -> Optional[dict[str, Any]]: ...
+
+    def upsert_shared_tool_cache(
+        self,
+        *,
+        tool_name: str,
+        cache_key: str,
+        params_json: dict[str, Any],
+        response_json: dict[str, Any],
+        ttl_seconds: Optional[int] = None,
+    ) -> None: ...
+
 
 class NullConversationHistoryRepository:
     def is_enabled(self) -> bool:
@@ -183,6 +200,25 @@ class NullConversationHistoryRepository:
         params_json: dict[str, Any],
         response_json: dict[str, Any],
         source_message_db_id: Optional[int] = None,
+        ttl_seconds: Optional[int] = None,
+    ) -> None:
+        raise ConversationHistoryDisabledError("Conversation history persistence is not configured")
+
+    def get_shared_tool_cache(
+        self,
+        *,
+        tool_name: str,
+        cache_key: str,
+    ) -> Optional[dict[str, Any]]:
+        raise ConversationHistoryDisabledError("Conversation history persistence is not configured")
+
+    def upsert_shared_tool_cache(
+        self,
+        *,
+        tool_name: str,
+        cache_key: str,
+        params_json: dict[str, Any],
+        response_json: dict[str, Any],
         ttl_seconds: Optional[int] = None,
     ) -> None:
         raise ConversationHistoryDisabledError("Conversation history persistence is not configured")
@@ -667,6 +703,148 @@ class MySQLConversationHistoryRepository:
         finally:
             connection.close()
 
+    def get_shared_tool_cache(
+        self,
+        *,
+        tool_name: str,
+        cache_key: str,
+    ) -> Optional[dict[str, Any]]:
+        self._ensure_enabled()
+
+        connection = self._connect()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            try:
+                cursor.execute(
+                    """
+                    SELECT id, response_json, created_at, expires_at
+                    FROM tool_result_cache
+                    WHERE tool_name = %s
+                      AND cache_key = %s
+                      AND invalidated_at IS NULL
+                      AND (expires_at IS NULL OR expires_at >= UTC_TIMESTAMP(6))
+                    LIMIT 1
+                    """,
+                    (tool_name, cache_key),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    return None
+
+                cursor.execute(
+                    """
+                    UPDATE tool_result_cache
+                    SET hit_count = hit_count + 1,
+                        last_hit_at = CURRENT_TIMESTAMP(6)
+                    WHERE id = %s
+                    """,
+                    (self._coerce_int(row["id"], field_name="shared cache id"),),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                logger.exception(
+                    "Failed to read shared tool cache tool_name=%s cache_key=%s",
+                    tool_name,
+                    cache_key,
+                )
+                raise
+            finally:
+                cursor.close()
+        finally:
+            connection.close()
+
+        response_json = self._json_from_db_value(row.get("response_json"))
+        if not isinstance(response_json, dict):
+            return None
+        return {
+            "response_json": response_json,
+            "created_at": self._datetime_to_isoformat(row.get("created_at")),
+            "expires_at": self._datetime_to_isoformat(row.get("expires_at")),
+        }
+
+    def upsert_shared_tool_cache(
+        self,
+        *,
+        tool_name: str,
+        cache_key: str,
+        params_json: dict[str, Any],
+        response_json: dict[str, Any],
+        ttl_seconds: Optional[int] = None,
+    ) -> None:
+        self._ensure_enabled()
+        expires_at = self._utcnow() + timedelta(seconds=ttl_seconds) if ttl_seconds else None
+        dimensions = self._shared_tool_cache_dimensions(params_json)
+
+        connection = self._connect()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO tool_result_cache (
+                        tool_name,
+                        cache_key,
+                        scope_type,
+                        statement_period,
+                        start_period,
+                        end_period,
+                        start_date,
+                        end_date,
+                        account,
+                        payment_method,
+                        params_json,
+                        response_json,
+                        expires_at,
+                        invalidated_at,
+                        hit_count,
+                        last_hit_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, 0, NULL)
+                    ON DUPLICATE KEY UPDATE
+                        scope_type = VALUES(scope_type),
+                        statement_period = VALUES(statement_period),
+                        start_period = VALUES(start_period),
+                        end_period = VALUES(end_period),
+                        start_date = VALUES(start_date),
+                        end_date = VALUES(end_date),
+                        account = VALUES(account),
+                        payment_method = VALUES(payment_method),
+                        params_json = VALUES(params_json),
+                        response_json = VALUES(response_json),
+                        expires_at = VALUES(expires_at),
+                        invalidated_at = NULL
+                    """,
+                    (
+                        tool_name,
+                        cache_key,
+                        dimensions["scope_type"],
+                        dimensions["statement_period"],
+                        dimensions["start_period"],
+                        dimensions["end_period"],
+                        dimensions["start_date"],
+                        dimensions["end_date"],
+                        dimensions["account"],
+                        dimensions["payment_method"],
+                        self._json_or_none(params_json),
+                        self._json_or_none(response_json),
+                        expires_at,
+                    ),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                logger.exception(
+                    "Failed to upsert shared tool cache tool_name=%s cache_key=%s",
+                    tool_name,
+                    cache_key,
+                )
+                raise
+            finally:
+                cursor.close()
+        finally:
+            connection.close()
+
     def _ensure_enabled(self) -> None:
         if not self._enabled:
             raise ConversationHistoryDisabledError("Conversation history persistence is not configured")
@@ -743,6 +921,22 @@ class MySQLConversationHistoryRepository:
         return None
 
     @staticmethod
+    def _shared_tool_cache_dimensions(params_json: dict[str, Any]) -> dict[str, Any]:
+        time_scope = params_json.get("time_scope") if isinstance(params_json, dict) else None
+        time_scope_payload = time_scope if isinstance(time_scope, dict) else {}
+        statement_period = time_scope_payload.get("statement_period") or params_json.get("period")
+        return {
+            "scope_type": MySQLConversationHistoryRepository._coerce_str_or_none(time_scope_payload.get("scope_type")),
+            "statement_period": MySQLConversationHistoryRepository._coerce_str_or_none(statement_period),
+            "start_period": MySQLConversationHistoryRepository._coerce_str_or_none(time_scope_payload.get("start_period")),
+            "end_period": MySQLConversationHistoryRepository._coerce_str_or_none(time_scope_payload.get("end_period")),
+            "start_date": MySQLConversationHistoryRepository._coerce_date_or_none(time_scope_payload.get("start_date")),
+            "end_date": MySQLConversationHistoryRepository._coerce_date_or_none(time_scope_payload.get("end_date")),
+            "account": MySQLConversationHistoryRepository._coerce_str_or_none(params_json.get("account")),
+            "payment_method": MySQLConversationHistoryRepository._coerce_str_or_none(params_json.get("payment_method")),
+        }
+
+    @staticmethod
     def _get_message_row_id(cursor: Any, message_id: str) -> int:
         cursor.execute(
             """
@@ -784,6 +978,29 @@ class MySQLConversationHistoryRepository:
             return int(value)
         except (TypeError, ValueError) as exc:
             raise TypeError(f"Cannot convert {field_name} to int: {type(value)}") from exc
+
+    @staticmethod
+    def _coerce_str_or_none(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = value.strip() if isinstance(value, str) else str(value).strip()
+        return normalized or None
+
+    @staticmethod
+    def _coerce_date_or_none(value: Any) -> Optional[date]:
+        if value is None or value == "":
+            return None
+        if isinstance(value, date) and not isinstance(value, datetime):
+            return value
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, str):
+            try:
+                return date.fromisoformat(value)
+            except ValueError:
+                logger.debug("Ignoring invalid cache date value=%s", value)
+                return None
+        return None
 
 
 

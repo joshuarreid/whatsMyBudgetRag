@@ -71,6 +71,8 @@ class RagToolTraceResponse(AnalyticsBaseModel):
 
 class RagCacheMetadataResponse(AnalyticsBaseModel):
     enabled: bool = False
+    eligible: bool = False
+    reason: Optional[str] = None
     hits: int = 0
     misses: int = 0
     writes: int = 0
