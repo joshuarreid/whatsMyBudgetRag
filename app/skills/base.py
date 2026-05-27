@@ -16,6 +16,7 @@ class SkillDefinition:
     keywords: tuple[str, ...] = ()
     required: bool = False
     cacheable: bool = True
+    expand_with_multi_scope: bool = True
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,10 @@ class Skill(ABC):
     @property
     def required(self) -> bool:
         return self.definition.required
+
+    @property
+    def expand_with_multi_scope(self) -> bool:
+        return self.definition.expand_with_multi_scope
 
     def matches(self, question: str) -> bool:
         lowered = question.lower()

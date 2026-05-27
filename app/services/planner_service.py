@@ -70,10 +70,34 @@ class PlannerService:
 
         steps: list[RagPlanStep] = []
         seen_output_keys: set[str] = set()
+        original_scope_label = self._scope_label(time_scope)
+        if time_scope.scope_type == "statement_period_range":
+            for skill in skills:
+                if skill.expand_with_multi_scope:
+                    continue
+                output_key = self._unique_output_key(
+                    base_key=skill.context_key,
+                    seen_output_keys=seen_output_keys,
+                )
+                steps.append(
+                    RagPlanStep(
+                        step_id=f"{skill.skill_id}_{self._slugify(original_scope_label)}",
+                        skill_id=skill.skill_id,
+                        context_key=skill.context_key,
+                        output_key=output_key,
+                        label=original_scope_label,
+                        time_scope=time_scope,
+                        period=period,
+                        payment_method=payment_method,
+                        account=account,
+                    )
+                )
         for planned_scope in planned_scopes:
             step_period = self._derive_period(planned_scope.time_scope)
             step_label = planned_scope.label
             for skill in skills:
+                if time_scope.scope_type == "statement_period_range" and not skill.expand_with_multi_scope:
+                    continue
                 output_key = self._unique_output_key(
                     base_key=f"{skill.context_key}_{self._slugify(step_label)}",
                     seen_output_keys=seen_output_keys,

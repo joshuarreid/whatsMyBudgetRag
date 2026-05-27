@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
 import logging
 from datetime import date, datetime
+from time import perf_counter
 from typing import Any, Optional
 
 from app.clients.spring_boot_client import SpringBootClient
@@ -17,6 +19,8 @@ from app.models.schemas import (
     RagConversationResponse,
     RagExecutionPlan,
     RagIntentResponse,
+    RagPlanStep,
+    RagTimingMetadataResponse,
     RagTimeScope,
     RagToolTraceResponse,
 )
@@ -36,6 +40,17 @@ logger = logging.getLogger(__name__)
 
 TOOL_CACHE_TTL_SECONDS = 900
 MAX_RESPONSE_CITATIONS = 5
+TREND_ROUTING_KEYWORDS = ("daily", "trend", "over time", "time series")
+SUMMARY_ROUTING_KEYWORDS = ("overview", "summary", "summarize", "total", "how much")
+ANSWER_CONTEXT_EXCLUDED_KEYS = {
+    "cache",
+    "conversation",
+    "conversation_history",
+    "execution_plan",
+    "routing",
+    "supporting_sources",
+    "tool_trace_summaries",
+}
 
 
 class RAGService:
@@ -70,6 +85,7 @@ class RAGService:
         transaction_id: Optional[str] = None,
     ) -> RagAnswerResponse:
         requested_time_scope = self._normalize_time_scope_input(time_scope=time_scope, period=period)
+        reference_date = date.today()
         logger.info(
             "RAG answer requested requested_period=%s requested_time_scope=%s payment_method=%s account=%s transaction_id=%s question_length=%s",
             period or "-",
@@ -91,7 +107,10 @@ class RAGService:
                 period=self._derive_period_from_time_scope(requested_time_scope),
                 transaction_id=transaction_id,
             )
-            llm_intent = self._classify_intent(question)
+            intent_classification = self._intent_classification_policy(question, today=reference_date)
+            classifier_started_at = perf_counter()
+            llm_intent = None if intent_classification["skip"] else self._classify_intent(question)
+            classifier_latency_ms = int((perf_counter() - classifier_started_at) * 1000)
             selected_time_scope, period_interpretation = self._resolve_time_scope(
                 question=question,
                 time_scope=requested_time_scope,
@@ -99,6 +118,7 @@ class RAGService:
                 transaction_id=transaction_id,
                 conversation_history=prior_messages,
                 llm_intent=llm_intent,
+                today=reference_date,
             )
             selected_period = self._derive_period_from_time_scope(selected_time_scope)
             selected_account, account_interpretation = self._resolve_account(
@@ -108,6 +128,13 @@ class RAGService:
                 llm_intent=llm_intent,
             )
             selected_skills, routing_metadata = self._select_skills(question, llm_intent=llm_intent)
+            routing_metadata["intent_classification"] = {
+                "attempted": not intent_classification["skip"],
+                "skipped": intent_classification["skip"],
+                "reason": intent_classification["reason"],
+                "direct_matches": intent_classification["direct_matches"],
+                "inferred_time_scope": intent_classification.get("inferred_time_scope"),
+            }
             execution_plan = self.planner.build_plan(
                 question=question,
                 skills=selected_skills,
@@ -136,6 +163,7 @@ class RAGService:
                 account=selected_account,
                 transaction_id=transaction_id,
             )
+            plan_execution_started_at = perf_counter()
             context, tool_traces, response_citations, cache_metadata = self._build_context(
                 skill_request=skill_request,
                 plan=plan,
@@ -147,7 +175,17 @@ class RAGService:
                 conversation_id=resolved_conversation_id,
                 conversation_history=prior_messages,
             )
-            llm_answer = self.llm.generate_answer(question, context) if self.llm else None
+            plan_execution_latency_ms = int((perf_counter() - plan_execution_started_at) * 1000)
+            answer_context = self._build_answer_context(context)
+            answer_generation_started_at = perf_counter()
+            llm_answer = self.llm.generate_answer(question, answer_context) if self.llm else None
+            answer_generation_latency_ms = int((perf_counter() - answer_generation_started_at) * 1000)
+            timing_metadata = self._build_timing_metadata(
+                tool_traces=tool_traces,
+                classifier_latency_ms=classifier_latency_ms,
+                plan_execution_latency_ms=plan_execution_latency_ms,
+                answer_generation_latency_ms=answer_generation_latency_ms,
+            )
             answer = llm_answer or self._fallback_answer(context)
             assistant_message = self._persist_message(
                 resolved_conversation_id,
@@ -178,6 +216,7 @@ class RAGService:
                     "citations": response_citations,
                     "tool_traces": self._response_tool_traces(tool_traces),
                     "cache": cache_metadata,
+                    "timing": timing_metadata,
                     "answer": answer,
                 },
             )
@@ -207,6 +246,7 @@ class RAGService:
                 citations=[RagCitationResponse.model_validate(citation) for citation in response_citations],
                 tool_traces=self._response_tool_traces(tool_traces),
                 cache=RagCacheMetadataResponse.model_validate(cache_metadata),
+                timing=RagTimingMetadataResponse.model_validate(timing_metadata),
                 answer=answer,
             )
         except Exception:
@@ -485,35 +525,38 @@ class RAGService:
         tool_traces: list[dict[str, Any]] = []
         resolved_skills = {skill.skill_id: skill for skill in skills}
 
-        for step in execution_plan.steps:
-            skill = resolved_skills.get(step.skill_id)
-            if skill is None:
-                unavailable_skills.append(
-                    {
-                        "tool": step.skill_id,
-                        "error_type": "UnknownSkill",
-                        "detail": f"Planned skill {step.skill_id} is not registered",
-                        "step_id": step.step_id,
-                        "output_key": step.output_key,
-                        "label": step.label,
-                    }
+        indexed_results: list[tuple[int, RagPlanStep, dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]]
+        if len(execution_plan.steps) <= 1:
+            indexed_results = [
+                self._execute_plan_step(
+                    step_index=step_index,
+                    step=step,
+                    resolved_skills=resolved_skills,
+                    question=question,
+                    transaction_id=transaction_id,
+                    cache_lookup=cache_lookup,
                 )
-                continue
+                for step_index, step in enumerate(execution_plan.steps)
+            ]
+        else:
+            max_workers = min(len(execution_plan.steps), 8)
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [
+                    executor.submit(
+                        self._execute_plan_step,
+                        step_index=step_index,
+                        step=step,
+                        resolved_skills=resolved_skills,
+                        question=question,
+                        transaction_id=transaction_id,
+                        cache_lookup=cache_lookup,
+                    )
+                    for step_index, step in enumerate(execution_plan.steps)
+                ]
+                indexed_results = [future.result() for future in as_completed(futures)]
+            indexed_results.sort(key=lambda item: item[0])
 
-            step_request = SkillRequest(
-                question=question,
-                time_scope=step.time_scope,
-                period=step.period,
-                payment_method=step.payment_method,
-                account=step.account,
-                transaction_id=transaction_id,
-            )
-            step_context, step_unavailable, step_traces = self.skill_registry.execute(
-                [skill],
-                step_request,
-                cache_lookup=cache_lookup,
-            )
-
+        for _, step, step_context, step_unavailable, step_traces in indexed_results:
             if step_context:
                 payload = step_context.get(step.context_key)
                 if payload is None:
@@ -540,6 +583,41 @@ class RAGService:
 
         return context_sections, unavailable_skills, tool_traces
 
+    def _execute_plan_step(
+        self,
+        *,
+        step_index: int,
+        step: RagPlanStep,
+        resolved_skills: dict[str, Skill],
+        question: str,
+        transaction_id: Optional[str],
+        cache_lookup: Optional[Any],
+    ) -> tuple[int, RagPlanStep, dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+        skill = resolved_skills.get(step.skill_id)
+        if skill is None:
+            return step_index, step, {}, [
+                {
+                    "tool": step.skill_id,
+                    "error_type": "UnknownSkill",
+                    "detail": f"Planned skill {step.skill_id} is not registered",
+                }
+            ], []
+
+        step_request = SkillRequest(
+            question=question,
+            time_scope=step.time_scope,
+            period=step.period,
+            payment_method=step.payment_method,
+            account=step.account,
+            transaction_id=transaction_id,
+        )
+        step_context, step_unavailable, step_traces = self.skill_registry.execute(
+            [skill],
+            step_request,
+            cache_lookup=cache_lookup,
+        )
+        return step_index, step, step_context, step_unavailable, step_traces
+
     def _apply_cache_policy(self, tool_traces: list[dict[str, Any]], *, cache_allowed: bool) -> None:
         if cache_allowed:
             return
@@ -553,8 +631,11 @@ class RAGService:
         *,
         llm_intent: Optional[RagIntentResponse] = None,
     ) -> tuple[list[Skill], dict[str, Any]]:
-        llm_selected_skills = self.skill_registry.resolve(llm_intent.skill_ids) if llm_intent is not None else []
-        deterministic_skills = self.skill_registry.select(question)
+        llm_selected_skills = self._optimize_skill_selection(
+            question,
+            self.skill_registry.resolve(llm_intent.skill_ids) if llm_intent is not None else [],
+        )
+        deterministic_skills = self._optimize_skill_selection(question, self.skill_registry.select(question))
         tool_selection = {
             "llm_suggested_tools": [skill.skill_id for skill in llm_selected_skills],
             "deterministic_tools": [skill.skill_id for skill in deterministic_skills],
@@ -581,12 +662,101 @@ class RAGService:
             "tool_selection": tool_selection,
         }
 
-    def _classify_intent(self, question: str) -> Optional[RagIntentResponse]:
+    def _optimize_skill_selection(self, question: str, skills: list[Skill]) -> list[Skill]:
+        optimized: list[Skill] = []
+        seen_skill_ids: set[str] = set()
+        for skill in skills:
+            if skill.skill_id in seen_skill_ids:
+                continue
+            optimized.append(skill)
+            seen_skill_ids.add(skill.skill_id)
+
+        if self._is_trend_only_question(question) and any(skill.skill_id != "overview" for skill in optimized):
+            optimized = [skill for skill in optimized if skill.skill_id != "overview"]
+        return optimized
+
+    @staticmethod
+    def _is_trend_only_question(question: str) -> bool:
+        lowered = question.lower()
+        has_trend_signal = any(keyword in lowered for keyword in TREND_ROUTING_KEYWORDS)
+        has_summary_signal = any(keyword in lowered for keyword in SUMMARY_ROUTING_KEYWORDS)
+        return has_trend_signal and not has_summary_signal
+
+    def _intent_classification_policy(
+        self,
+        question: str,
+        *,
+        today: Optional[date] = None,
+    ) -> dict[str, Any]:
+        registry_skills = getattr(self.skill_registry, "skills", None)
+        direct_matches = self._optimize_skill_selection(
+            question,
+            [skill for skill in registry_skills if skill.matches(question)] if isinstance(registry_skills, list) else [],
+        )
+        direct_match_ids = [skill.skill_id for skill in direct_matches]
+        classifier = self._intent_classifier()
+        if classifier is None:
+            return {
+                "skip": True,
+                "reason": "intent_service_unavailable",
+                "direct_matches": direct_match_ids,
+            }
+        if not direct_matches:
+            return {"skip": False, "reason": None, "direct_matches": direct_match_ids}
+        if len(direct_matches) > 2:
+            return {
+                "skip": False,
+                "reason": "too_many_deterministic_matches",
+                "direct_matches": direct_match_ids,
+            }
+        lowered = question.lower()
+        if any(marker in lowered for marker in (" and then ", ";", " plus ", " also ")):
+            return {
+                "skip": False,
+                "reason": "compound_question",
+                "direct_matches": direct_match_ids,
+            }
+        if len(direct_matches) == 1:
+            inferred_time_scope = self.intent_parser.infer_time_scope(
+                question=question,
+                today=today or date.today(),
+                llm_intent=None,
+            )
+            return {
+                "skip": True,
+                "reason": "deterministic_routing_confident",
+                "direct_matches": direct_match_ids,
+                "inferred_time_scope": inferred_time_scope.get("time_scope") if inferred_time_scope is not None else None,
+            }
+        if not self._is_trend_only_question(question):
+            return {
+                "skip": False,
+                "reason": "requires_llm_disambiguation",
+                "direct_matches": direct_match_ids,
+            }
+        inferred_time_scope = self.intent_parser.infer_time_scope(
+            question=question,
+            today=today or date.today(),
+            llm_intent=None,
+        )
+        return {
+            "skip": True,
+            "reason": "deterministic_routing_confident",
+            "direct_matches": direct_match_ids,
+            "inferred_time_scope": inferred_time_scope.get("time_scope") if inferred_time_scope is not None else None,
+        }
+
+    def _intent_classifier(self) -> Optional[Any]:
         service = self.intent_service
         if service is None and self.llm is not None and hasattr(self.llm, "classify_intent"):
             service = self.llm
-
         if service is None or not hasattr(service, "classify_intent"):
+            return None
+        return service
+
+    def _classify_intent(self, question: str) -> Optional[RagIntentResponse]:
+        service = self._intent_classifier()
+        if service is None:
             return None
 
         try:
@@ -648,6 +818,47 @@ class RAGService:
                 "date_range": "Resolve to inclusive ISO date boundaries when the question uses week, day, or partial-month phrasing.",
             },
             "selection_source": period_interpretation.get("source", "unknown"),
+        }
+
+    def _build_answer_context(self, context: dict[str, Any]) -> dict[str, Any]:
+        answer_context: dict[str, Any] = {}
+        for key, value in context.items():
+            if key in ANSWER_CONTEXT_EXCLUDED_KEYS:
+                continue
+            if key == "unavailable_tools" and isinstance(value, list):
+                answer_context[key] = [
+                    {
+                        "tool": item.get("tool"),
+                        "detail": item.get("detail"),
+                        "label": item.get("label"),
+                    }
+                    for item in value
+                    if isinstance(item, dict)
+                ]
+                continue
+            answer_context[key] = value
+        return answer_context
+
+    @staticmethod
+    def _build_timing_metadata(
+        *,
+        tool_traces: list[dict[str, Any]],
+        classifier_latency_ms: int,
+        plan_execution_latency_ms: int,
+        answer_generation_latency_ms: int,
+    ) -> dict[str, int]:
+        return {
+            "classifier_latency_ms": classifier_latency_ms,
+            "plan_execution_latency_ms": plan_execution_latency_ms,
+            "cache_lookup_latency_ms": sum(
+                int(trace.get("cache_lookup_duration_ms", 0) or 0)
+                for trace in tool_traces
+            ),
+            "tool_execution_latency_ms": sum(
+                int(trace.get("tool_execution_duration_ms", 0) or 0)
+                for trace in tool_traces
+            ),
+            "answer_generation_latency_ms": answer_generation_latency_ms,
         }
 
     def _prepare_conversation(

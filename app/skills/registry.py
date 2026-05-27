@@ -64,8 +64,15 @@ class SkillRegistry:
         for skill in skills:
             arguments = self._build_tool_arguments(request)
             started_at = perf_counter()
+            cache_lookup_duration_ms = 0
+            tool_execution_duration_ms = 0
             try:
-                cached_result = cache_lookup(skill, arguments) if cache_lookup is not None and skill.definition.cacheable else None
+                if cache_lookup is not None and skill.definition.cacheable:
+                    cache_lookup_started_at = perf_counter()
+                    cached_result = cache_lookup(skill, arguments)
+                    cache_lookup_duration_ms = int((perf_counter() - cache_lookup_started_at) * 1000)
+                else:
+                    cached_result = None
                 cache_hit = cached_result is not None
 
                 if cached_result is not None:
@@ -78,7 +85,9 @@ class SkillRegistry:
                     )
                     context_key = str(cached_result.get("context_key") or skill.context_key)
                 else:
+                    tool_execution_started_at = perf_counter()
                     result = skill.execute(request)
+                    tool_execution_duration_ms = int((perf_counter() - tool_execution_started_at) * 1000)
                     payload = result.payload
                     metadata = self._normalize_result_metadata(
                         skill,
@@ -95,6 +104,8 @@ class SkillRegistry:
                     "category": skill.category,
                     "status": "ok",
                     "duration_ms": duration_ms,
+                    "cache_lookup_duration_ms": cache_lookup_duration_ms,
+                    "tool_execution_duration_ms": tool_execution_duration_ms,
                     "cache_hit": cache_hit,
                     "cacheable": skill.definition.cacheable,
                     "arguments": arguments,
@@ -123,6 +134,8 @@ class SkillRegistry:
                         "category": skill.category,
                         "status": "error",
                         "duration_ms": duration_ms,
+                        "cache_lookup_duration_ms": cache_lookup_duration_ms,
+                        "tool_execution_duration_ms": tool_execution_duration_ms,
                         "cache_hit": False,
                         "cacheable": skill.definition.cacheable,
                         "arguments": arguments,
@@ -156,6 +169,8 @@ class SkillRegistry:
                         "category": skill.category,
                         "status": "error",
                         "duration_ms": duration_ms,
+                        "cache_lookup_duration_ms": cache_lookup_duration_ms,
+                        "tool_execution_duration_ms": tool_execution_duration_ms,
                         "cache_hit": False,
                         "cacheable": skill.definition.cacheable,
                         "arguments": arguments,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from datetime import date, datetime, timezone
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -33,6 +34,26 @@ class RecordingSkill(Skill):
                 "account": request.account,
                 "payment_method": request.payment_method,
             },
+        )
+
+
+class SleepingSkill(Skill):
+    def __init__(self, *, skill_id: str, context_key: str, keywords: tuple[str, ...], delay_seconds: float) -> None:
+        self.definition = SkillDefinition(
+            skill_id=skill_id,
+            category="analytics",
+            context_key=context_key,
+            description=f"Sleeping skill {skill_id}",
+            keywords=keywords,
+        )
+        self.delay_seconds = delay_seconds
+
+    def execute(self, request: SkillRequest) -> SkillResult:
+        time.sleep(self.delay_seconds)
+        return SkillResult(
+            skill_id=self.skill_id,
+            context_key=self.context_key,
+            payload={"period": request.period},
         )
 
 
@@ -324,6 +345,220 @@ class RAGServiceIntentDependencyTests(unittest.TestCase):
             available_skills=[{"skill_id": "overview"}],
         )
         llm.classify_intent.assert_not_called()
+
+
+class RAGServiceLatencyOptimizationTests(unittest.TestCase):
+    def test_answer_skips_llm_classification_for_confident_trend_question(self) -> None:
+        registry = SkillRegistry(
+            [
+                RecordingSkill(skill_id="overview", context_key="overview", keywords=("spend", "summary", "overview")),
+                RecordingSkill(skill_id="daily", context_key="daily_totals", keywords=("daily", "trend")),
+            ]
+        )
+        llm = Mock()
+        llm.classify_intent.return_value = SimpleNamespace(skill_ids=["overview"])
+        llm.generate_answer.return_value = None
+        service = RAGService(Mock(), registry, llm)
+
+        response = service.answer(question="Show my daily spending trend from December through February")
+
+        llm.classify_intent.assert_not_called()
+        self.assertEqual(response.context["routing"]["source"], "keyword_match")
+        self.assertTrue(response.context["routing"]["intent_classification"]["skipped"])
+        self.assertEqual(response.tool_selection.deterministic_tools, ["daily"])
+        self.assertEqual(response.plan, ["daily", "daily", "daily"])
+
+    def test_answer_passes_compact_context_to_llm_generation(self) -> None:
+        registry = SkillRegistry(
+            [
+                RecordingSkill(skill_id="overview", context_key="overview", keywords=("spend", "summary")),
+                RecordingSkill(skill_id="averages", context_key="averages", keywords=("average",)),
+            ]
+        )
+        llm = Mock()
+        llm.classify_intent.return_value = None
+        llm.generate_answer.return_value = "Compact answer"
+        service = RAGService(Mock(), registry, llm)
+
+        response = service.answer(question="What was my average spend this month?", period="May2026")
+
+        self.assertEqual(response.answer, "Compact answer")
+        llm.generate_answer.assert_called_once()
+        compact_context = llm.generate_answer.call_args.args[1]
+        self.assertIn("overview", compact_context)
+        self.assertIn("averages", compact_context)
+        self.assertNotIn("routing", compact_context)
+        self.assertNotIn("execution_plan", compact_context)
+        self.assertNotIn("supporting_sources", compact_context)
+        self.assertNotIn("tool_trace_summaries", compact_context)
+        self.assertNotIn("cache", compact_context)
+        self.assertNotIn("conversation_history", compact_context)
+
+    def test_answer_returns_timing_outside_context_and_persists_it_in_answer_json(self) -> None:
+        registry = SkillRegistry(
+            [RecordingSkill(skill_id="overview", context_key="overview", keywords=("spend", "summary", "total"))]
+        )
+        history = Mock()
+        history.is_enabled.return_value = True
+        history.get_tool_cache.return_value = None
+        history.get_shared_tool_cache.return_value = None
+        history.create_conversation.return_value = ConversationRecord(
+            conversation_id="conv-timing",
+            title="Timing chat",
+            created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+            last_message_at=None,
+        )
+        history.append_message.side_effect = [
+            ConversationMessageRecord(
+                message_id="msg-user",
+                role="user",
+                content="What did I spend?",
+                period=None,
+                period_source=None,
+                created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+            ),
+            ConversationMessageRecord(
+                db_id=301,
+                message_id="msg-assistant",
+                role="assistant",
+                content="Stored answer",
+                period="May2026",
+                period_source="request_parameter",
+                created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+            ),
+        ]
+        service = RAGService(Mock(), registry, None, history)
+
+        response = service.answer(question="What did I spend?", period="April2026")
+
+        self.assertNotIn("timing", response.context)
+        self.assertGreaterEqual(response.timing.classifier_latency_ms, 0)
+        self.assertGreaterEqual(response.timing.plan_execution_latency_ms, 0)
+        self.assertGreaterEqual(response.timing.cache_lookup_latency_ms, 0)
+        self.assertGreaterEqual(response.timing.tool_execution_latency_ms, 0)
+        self.assertGreaterEqual(response.timing.answer_generation_latency_ms, 0)
+        assistant_call = history.append_message.call_args_list[1]
+        self.assertEqual(
+            assistant_call.kwargs["answer_json"]["timing"],
+            {
+                "classifier_latency_ms": response.timing.classifier_latency_ms,
+                "plan_execution_latency_ms": response.timing.plan_execution_latency_ms,
+                "cache_lookup_latency_ms": response.timing.cache_lookup_latency_ms,
+                "tool_execution_latency_ms": response.timing.tool_execution_latency_ms,
+                "answer_generation_latency_ms": response.timing.answer_generation_latency_ms,
+            },
+        )
+
+    def test_answer_timing_separates_cache_lookup_from_tool_execution(self) -> None:
+        registry = Mock()
+        registry.skills = []
+        registry.select.return_value = []
+        registry.resolve.return_value = []
+        registry.available_skills.return_value = []
+        history = Mock()
+        history.is_enabled.return_value = True
+        history.get_tool_cache.return_value = {
+            "response_json": {
+                "context_key": "overview",
+                "payload": {"total_amount": "42.00"},
+                "metadata": {"citation": None},
+            },
+            "created_at": "2026-05-23T00:00:00+00:00",
+            "expires_at": "2026-05-23T00:15:00+00:00",
+        }
+        history.get_shared_tool_cache.return_value = None
+        history.create_conversation.return_value = ConversationRecord(
+            conversation_id="conv-cache-timing",
+            title="Cache timing chat",
+            created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+            last_message_at=None,
+        )
+        history.append_message.side_effect = [
+            ConversationMessageRecord(
+                message_id="msg-user",
+                role="user",
+                content="What did I spend?",
+                period=None,
+                period_source=None,
+                created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+            ),
+            ConversationMessageRecord(
+                db_id=302,
+                message_id="msg-assistant",
+                role="assistant",
+                content="Stored answer",
+                period="April2026",
+                period_source="request_parameter",
+                created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+            ),
+        ]
+        service = RAGService(Mock(), registry, None, history)
+
+        def execute_with_split_timing(skills, request, cache_lookup=None):
+            arguments = {
+                "time_scope": request.time_scope.model_dump(mode="json", exclude_none=True),
+                "period": request.period,
+                "payment_method": request.payment_method,
+                "account": request.account,
+                "transaction_id": request.transaction_id,
+            }
+            cached = cache_lookup(SimpleNamespace(skill_id="overview", context_key="overview"), arguments)
+            self.assertIsNotNone(cached)
+            return (
+                {"overview": cached["payload"]},
+                [],
+                [
+                    {
+                        "tool_name": "overview",
+                        "context_key": "overview",
+                        "category": "analytics",
+                        "status": "ok",
+                        "duration_ms": 4,
+                        "cache_lookup_duration_ms": 3,
+                        "tool_execution_duration_ms": 0,
+                        "cache_hit": True,
+                        "cacheable": True,
+                        "arguments": arguments,
+                        "result": cached["payload"],
+                        "result_summary": {"total_amount": "42.00"},
+                        "citation": None,
+                        "description": "Overview source",
+                    }
+                ],
+            )
+
+        registry.execute.side_effect = execute_with_split_timing
+
+        response = service.answer(question="What did I spend?", period="April2026")
+
+        self.assertEqual(response.timing.cache_lookup_latency_ms, 3)
+        self.assertEqual(response.timing.tool_execution_latency_ms, 0)
+        self.assertGreaterEqual(response.timing.plan_execution_latency_ms, 0)
+
+    def test_execute_plan_parallelizes_independent_monthly_steps(self) -> None:
+        registry = SkillRegistry(
+            [
+                SleepingSkill(
+                    skill_id="daily",
+                    context_key="daily_totals",
+                    keywords=("daily", "trend"),
+                    delay_seconds=0.25,
+                )
+            ]
+        )
+        service = RAGService(Mock(), registry, None)
+
+        started_at = time.perf_counter()
+        response = service.answer(question="Show the daily trend from December through February")
+        elapsed = time.perf_counter() - started_at
+
+        self.assertLess(elapsed, 0.6)
+        self.assertEqual(response.plan, ["daily", "daily", "daily"])
+        self.assertIn("daily_totals_december2025", response.context)
+        self.assertIn("daily_totals_january2026", response.context)
+        self.assertIn("daily_totals_february2026", response.context)
 
 
 class RAGServiceConversationHistoryTests(unittest.TestCase):

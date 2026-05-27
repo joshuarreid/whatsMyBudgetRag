@@ -95,6 +95,14 @@ class RagCacheMetadataResponse(AnalyticsBaseModel):
     writes: int = 0
 
 
+class RagTimingMetadataResponse(AnalyticsBaseModel):
+    classifier_latency_ms: int = 0
+    plan_execution_latency_ms: int = 0
+    cache_lookup_latency_ms: int = 0
+    tool_execution_latency_ms: int = 0
+    answer_generation_latency_ms: int = 0
+
+
 class RagConversationMessageResponse(AnalyticsBaseModel):
     message_id: str
     role: str
@@ -300,4 +308,5 @@ class RagAnswerResponse(AnalyticsBaseModel):
     citations: list[RagCitationResponse] = Field(default_factory=list)
     tool_traces: list[RagToolTraceResponse] = Field(default_factory=list)
     cache: RagCacheMetadataResponse = Field(default_factory=RagCacheMetadataResponse)
+    timing: RagTimingMetadataResponse = Field(default_factory=RagTimingMetadataResponse)
     answer: str

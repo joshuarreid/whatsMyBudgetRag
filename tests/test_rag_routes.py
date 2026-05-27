@@ -40,6 +40,16 @@ class RagRoutesTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["conversation_id"], "conv-123")
+        self.assertEqual(
+            response.json()["timing"],
+            {
+                "classifier_latency_ms": 0,
+                "plan_execution_latency_ms": 0,
+                "cache_lookup_latency_ms": 0,
+                "tool_execution_latency_ms": 0,
+                "answer_generation_latency_ms": 0,
+            },
+        )
         self.service.answer.assert_called_once()
         self.assertEqual(self.service.answer.call_args.kwargs["conversation_id"], "conv-123")
 

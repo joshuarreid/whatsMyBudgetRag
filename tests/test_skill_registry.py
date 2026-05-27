@@ -216,6 +216,7 @@ class RAGServiceSkillIntegrationTests(unittest.TestCase):
             period="May2026",
         )
 
+        llm.classify_intent.assert_called_once()
         self.assertEqual(response.plan, ["averages"])
         self.assertEqual(response.tool_selection.llm_suggested_tools, ["averages"])
         self.assertEqual(response.tool_selection.deterministic_tools, ["overview"])
@@ -251,12 +252,14 @@ class RAGServiceSkillIntegrationTests(unittest.TestCase):
             period="May2026",
         )
 
+        llm.classify_intent.assert_called_once()
         self.assertEqual(response.plan, ["overview", "averages"])
         self.assertEqual(response.tool_selection.llm_suggested_tools, [])
         self.assertEqual(response.tool_selection.deterministic_tools, ["overview", "averages"])
         self.assertEqual(response.tool_selection.union_tools, ["overview", "averages"])
         self.assertEqual(response.context["routing"]["source"], "keyword_fallback")
         self.assertEqual(response.context["routing"]["resolved_skill_ids"], ["overview", "averages"])
+        self.assertFalse(response.context["routing"]["intent_classification"]["skipped"])
 
 
 if __name__ == "__main__":

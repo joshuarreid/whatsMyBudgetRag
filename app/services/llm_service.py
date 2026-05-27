@@ -34,8 +34,9 @@ class LLMService:
             "You are a finance assistant. Answer using only the provided API context. "
             "Statement periods always use MonthYear format such as October2025 or May2026. "
             "Use timeline_context and period_interpretation to resolve references like this month, current month, this period, last month, previous month, or a bare month name such as October. "
-            "Prefer the structured supporting_sources and tool_trace_summaries when deciding what evidence was used. "
+            "Use the provided skill outputs and any unavailable_tools notes when deciding what evidence was available. "
             "If the data is insufficient, say so clearly.\n\n"
+            "Your response should be in Markdown Language"
             f"Question:\n{question}\n\n"
             f"Context:\n{json.dumps(context, default=str, indent=2)}"
         )

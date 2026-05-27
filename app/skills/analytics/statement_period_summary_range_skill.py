@@ -19,6 +19,7 @@ class StatementPeriodSummaryRangeSkill(Skill):
             "summaries between",
             "period range summary",
         ),
+        expand_with_multi_scope=False,
     )
 
     def __init__(self, spring_client: SpringBootClient) -> None:

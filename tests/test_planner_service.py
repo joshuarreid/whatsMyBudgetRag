@@ -10,13 +10,14 @@ from app.skills.base import Skill, SkillDefinition
 
 
 class StubSkill(Skill):
-    def __init__(self, *, skill_id: str, context_key: str) -> None:
+    def __init__(self, *, skill_id: str, context_key: str, expand_with_multi_scope: bool = True) -> None:
         self.definition = SkillDefinition(
             skill_id=skill_id,
             category="analytics",
             context_key=context_key,
             description=f"Stub skill {skill_id}",
             keywords=(skill_id,),
+            expand_with_multi_scope=expand_with_multi_scope,
         )
 
     def execute(self, request):  # pragma: no cover - planning tests never execute skills
@@ -27,6 +28,11 @@ class PlannerServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.planner = PlannerService(intent_service=IntentService(enable_llm=False))
         self.daily_skill = StubSkill(skill_id="daily", context_key="daily_totals")
+        self.range_summary_skill = StubSkill(
+            skill_id="statement_period_summary_range",
+            context_key="statement_period_summary_range",
+            expand_with_multi_scope=False,
+        )
 
     def test_build_plan_repeats_same_skill_for_explicit_period_comparison(self) -> None:
         plan = self.planner.build_plan(
@@ -63,6 +69,32 @@ class PlannerServiceTests(unittest.TestCase):
         self.assertEqual([step.period for step in plan.steps], ["December2025", "January2026", "February2026"])
         self.assertEqual([step.payment_method for step in plan.steps], ["Visa", "Visa", "Visa"])
         self.assertEqual([step.account for step in plan.steps], ["Checking", "Checking", "Checking"])
+
+    def test_build_plan_keeps_range_native_skills_on_original_range_scope(self) -> None:
+        plan = self.planner.build_plan(
+            question="Show the daily trend from December through February",
+            skills=[self.daily_skill, self.range_summary_skill],
+            time_scope=RagTimeScope(
+                scope_type="statement_period_range",
+                start_period="December2025",
+                end_period="February2026",
+            ),
+            period=None,
+            payment_method=None,
+            account=None,
+            today=date(2026, 5, 27),
+        )
+
+        self.assertEqual(plan.strategy, "multi_scope")
+        self.assertEqual(plan.steps[0].skill_id, "statement_period_summary_range")
+        self.assertEqual(plan.steps[0].output_key, "statement_period_summary_range")
+        self.assertEqual(plan.steps[0].time_scope.scope_type, "statement_period_range")
+        self.assertEqual(plan.steps[0].time_scope.start_period, "December2025")
+        self.assertEqual(plan.steps[0].time_scope.end_period, "February2026")
+        self.assertEqual(
+            [step.period for step in plan.steps[1:]],
+            ["December2025", "January2026", "February2026"],
+        )
 
     def test_build_plan_keeps_single_scope_when_no_multi_period_signal_exists(self) -> None:
         plan = self.planner.build_plan(

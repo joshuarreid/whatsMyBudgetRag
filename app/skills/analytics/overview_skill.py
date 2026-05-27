@@ -11,7 +11,6 @@ class OverviewSkill(Skill):
         context_key="overview",
         description="Load the high-level spend overview for the selected statement period.",
         keywords=("overview", "summary", "spend", "total"),
-        required=True,
     )
 
     def __init__(self, analytics_service: AnalyticsService) -> None:
