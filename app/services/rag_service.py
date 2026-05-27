@@ -15,6 +15,7 @@ from app.models.schemas import (
     RagCitationResponse,
     RagConversationMessageResponse,
     RagConversationResponse,
+    RagExecutionPlan,
     RagIntentResponse,
     RagTimeScope,
     RagToolTraceResponse,
@@ -27,6 +28,7 @@ from app.repositories import (
     NullConversationHistoryRepository,
 )
 from app.services.intent_service import IntentService
+from app.services.planner_service import PlannerService
 from app.skills.base import Skill, SkillRequest
 from app.skills.registry import SkillRegistry
 
@@ -52,6 +54,7 @@ class RAGService:
         self.llm = llm_service
         self.intent_service = intent_service
         self.intent_parser = intent_service or IntentService(enable_llm=False)
+        self.planner = PlannerService(intent_service=self.intent_parser)
         settings = get_settings()
         self.conversation_history = conversation_history or NullConversationHistoryRepository()
         self.conversation_history_context_limit = settings.conversation_history_context_limit
@@ -105,13 +108,22 @@ class RAGService:
                 llm_intent=llm_intent,
             )
             selected_skills, routing_metadata = self._select_skills(question, llm_intent=llm_intent)
-            plan = [skill.skill_id for skill in selected_skills]
+            execution_plan = self.planner.build_plan(
+                question=question,
+                skills=selected_skills,
+                time_scope=selected_time_scope,
+                period=selected_period,
+                payment_method=payment_method,
+                account=selected_account,
+            )
+            plan = [step.skill_id for step in execution_plan.steps]
             logger.info(
-                "RAG execution plan selected period=%s time_scope=%s account=%s plan=%s period_source=%s account_source=%s routing_source=%s",
+                "RAG execution plan selected period=%s time_scope=%s account=%s plan=%s strategy=%s period_source=%s account_source=%s routing_source=%s",
                 selected_period or "-",
                 selected_time_scope.model_dump(mode="json", exclude_none=True),
                 selected_account or "-",
                 plan,
+                execution_plan.strategy,
                 period_interpretation.get("source", "unknown"),
                 account_interpretation.get("source", "unknown"),
                 routing_metadata.get("source", "unknown"),
@@ -130,6 +142,7 @@ class RAGService:
                 period_interpretation=period_interpretation,
                 account_interpretation=account_interpretation,
                 skills=selected_skills,
+                execution_plan=execution_plan,
                 routing_metadata=routing_metadata,
                 conversation_id=resolved_conversation_id,
                 conversation_history=prior_messages,
@@ -160,6 +173,7 @@ class RAGService:
                         "account": account_interpretation,
                     },
                     "plan": plan,
+                    "execution_plan": execution_plan.model_dump(mode="json", exclude_none=True),
                     "tool_selection": routing_metadata.get("tool_selection", {}),
                     "citations": response_citations,
                     "tool_traces": self._response_tool_traces(tool_traces),
@@ -370,6 +384,7 @@ class RAGService:
         period_interpretation: dict[str, Any],
         account_interpretation: dict[str, Optional[str]],
         skills: list[Skill],
+        execution_plan: RagExecutionPlan,
         routing_metadata: dict[str, Any],
         *,
         conversation_id: Optional[str] = None,
@@ -402,6 +417,7 @@ class RAGService:
                 "selected": plan,
                 "count": len(plan),
             },
+            "execution_plan": execution_plan.model_dump(mode="json", exclude_none=True),
             "routing": routing_metadata,
         }
         if conversation_id is not None:
@@ -425,11 +441,21 @@ class RAGService:
                 }
                 for message in conversation_history
             ]
-        skill_context, unavailable_skills, tool_traces = self.skill_registry.execute(
-            skills,
-            skill_request,
-            cache_lookup=(self._cache_lookup(conversation_id) if conversation_id is not None and cache_allowed else None),
-        )
+        cache_lookup = self._cache_lookup(conversation_id) if conversation_id is not None and cache_allowed else None
+        if execution_plan.steps:
+            skill_context, unavailable_skills, tool_traces = self._execute_plan(
+                execution_plan=execution_plan,
+                skills=skills,
+                question=skill_request.question,
+                transaction_id=skill_request.transaction_id,
+                cache_lookup=cache_lookup,
+            )
+        else:
+            skill_context, unavailable_skills, tool_traces = self.skill_registry.execute(
+                skills,
+                skill_request,
+                cache_lookup=cache_lookup,
+            )
         self._apply_cache_policy(tool_traces, cache_allowed=cache_allowed)
         context.update(skill_context)
 
@@ -444,6 +470,75 @@ class RAGService:
         context["tool_trace_summaries"] = [trace.model_dump(mode="json") for trace in self._response_tool_traces(tool_traces)]
 
         return context, tool_traces, response_citations, cache_metadata
+
+    def _execute_plan(
+        self,
+        *,
+        execution_plan: RagExecutionPlan,
+        skills: list[Skill],
+        question: str,
+        transaction_id: Optional[str],
+        cache_lookup: Optional[Any],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+        context_sections: dict[str, Any] = {}
+        unavailable_skills: list[dict[str, Any]] = []
+        tool_traces: list[dict[str, Any]] = []
+        resolved_skills = {skill.skill_id: skill for skill in skills}
+
+        for step in execution_plan.steps:
+            skill = resolved_skills.get(step.skill_id)
+            if skill is None:
+                unavailable_skills.append(
+                    {
+                        "tool": step.skill_id,
+                        "error_type": "UnknownSkill",
+                        "detail": f"Planned skill {step.skill_id} is not registered",
+                        "step_id": step.step_id,
+                        "output_key": step.output_key,
+                        "label": step.label,
+                    }
+                )
+                continue
+
+            step_request = SkillRequest(
+                question=question,
+                time_scope=step.time_scope,
+                period=step.period,
+                payment_method=step.payment_method,
+                account=step.account,
+                transaction_id=transaction_id,
+            )
+            step_context, step_unavailable, step_traces = self.skill_registry.execute(
+                [skill],
+                step_request,
+                cache_lookup=cache_lookup,
+            )
+
+            if step_context:
+                payload = step_context.get(step.context_key)
+                if payload is None:
+                    payload = next(iter(step_context.values()))
+                context_sections[step.output_key] = payload
+
+            unavailable_skills.extend(
+                {
+                    **item,
+                    "step_id": step.step_id,
+                    "output_key": step.output_key,
+                    "label": step.label,
+                }
+                for item in step_unavailable
+            )
+
+            for trace in step_traces:
+                trace["plan_step_id"] = step.step_id
+                trace["plan_step_label"] = step.label
+                trace["cache_context_key"] = trace.get("context_key")
+                trace["context_key"] = step.output_key
+                trace["output_key"] = step.output_key
+                tool_traces.append(trace)
+
+        return context_sections, unavailable_skills, tool_traces
 
     def _apply_cache_policy(self, tool_traces: list[dict[str, Any]], *, cache_allowed: bool) -> None:
         if cache_allowed:
@@ -798,7 +893,7 @@ class RAGService:
             cacheable_arguments = self._cacheable_arguments(arguments)
             cache_key = self._tool_cache_key(tool_name, arguments)
             response_payload = {
-                "context_key": trace.get("context_key"),
+                "context_key": trace.get("cache_context_key", trace.get("context_key")),
                 "payload": trace.get("result"),
                 "metadata": {
                     "citation": trace.get("citation"),
@@ -1108,6 +1203,12 @@ class RAGService:
             fragments.append(
                 f"Statement period summaries were included for {len(statement_period_summary_range)} periods in the selected range."
             )
+
+        execution_plan = context.get("execution_plan")
+        if isinstance(execution_plan, dict):
+            steps = execution_plan.get("steps")
+            if execution_plan.get("strategy") == "multi_scope" and isinstance(steps, list) and len(steps) > 1:
+                fragments.append(f"Executed {len(steps)} planned analytics steps for this question.")
 
         if "categories" in context:
             fragments.append("Category breakdown data was included from Spring Boot analytics.")

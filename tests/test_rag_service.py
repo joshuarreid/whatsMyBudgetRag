@@ -8,6 +8,32 @@ from unittest.mock import Mock
 from app.models.schemas import RagTimeScope
 from app.repositories import ConversationMessageRecord, ConversationRecord
 from app.services.rag_service import RAGService
+from app.skills.base import Skill, SkillDefinition, SkillRequest, SkillResult
+from app.skills.registry import SkillRegistry
+
+
+class RecordingSkill(Skill):
+    def __init__(self, *, skill_id: str, context_key: str, keywords: tuple[str, ...]) -> None:
+        self.definition = SkillDefinition(
+            skill_id=skill_id,
+            category="analytics",
+            context_key=context_key,
+            description=f"Recording skill {skill_id}",
+            keywords=keywords,
+            required=True,
+        )
+
+    def execute(self, request: SkillRequest) -> SkillResult:
+        return SkillResult(
+            skill_id=self.skill_id,
+            context_key=self.context_key,
+            payload={
+                "time_scope": request.time_scope.model_dump(mode="json", exclude_none=True) if request.time_scope else None,
+                "period": request.period,
+                "account": request.account,
+                "payment_method": request.payment_method,
+            },
+        )
 
 
 class RAGServicePeriodResolutionTests(unittest.TestCase):
@@ -743,6 +769,75 @@ class RAGServiceConversationHistoryTests(unittest.TestCase):
         self.assertEqual(response.cache.misses, 0)
         self.assertEqual(response.cache.writes, 0)
         self.assertFalse(response.tool_traces[0].cache_hit)
+
+    def test_answer_uses_distinct_cache_keys_for_repeated_planned_skill_steps(self) -> None:
+        registry = SkillRegistry(
+            [
+                RecordingSkill(
+                    skill_id="daily",
+                    context_key="daily_totals",
+                    keywords=("daily", "trend"),
+                )
+            ]
+        )
+        llm = Mock()
+        llm.classify_intent.return_value = None
+        llm.generate_answer.return_value = None
+        history = Mock()
+        history.is_enabled.return_value = True
+        history.get_tool_cache.return_value = None
+        history.get_shared_tool_cache.return_value = None
+        history.create_conversation.return_value = ConversationRecord(
+            conversation_id="conv-plan-cache",
+            title="Compare daily spend for April versus May",
+            created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+            last_message_at=None,
+        )
+        history.append_message.side_effect = [
+            ConversationMessageRecord(
+                message_id="msg-user",
+                role="user",
+                content="Compare daily spend for April versus May",
+                period=None,
+                period_source=None,
+                created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+            ),
+            ConversationMessageRecord(
+                db_id=201,
+                message_id="msg-assistant",
+                role="assistant",
+                content="Planned answer",
+                period="April2026",
+                period_source="question_bare_month",
+                created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+            ),
+        ]
+        service = RAGService(Mock(), registry, llm, history)
+
+        response = service.answer(question="Compare daily spend for April versus May")
+
+        self.assertEqual(response.plan, ["daily", "daily"])
+        self.assertEqual(response.context["execution_plan"]["strategy"], "multi_scope")
+        self.assertIn("daily_totals_april2026", response.context)
+        self.assertIn("daily_totals_may2026", response.context)
+        self.assertEqual(response.context["daily_totals_april2026"]["period"], "April2026")
+        self.assertEqual(response.context["daily_totals_may2026"]["period"], "May2026")
+        self.assertEqual(len(response.tool_traces), 2)
+        self.assertEqual(response.tool_traces[0].context_key, "daily_totals_april2026")
+        self.assertEqual(response.tool_traces[1].context_key, "daily_totals_may2026")
+
+        self.assertEqual(history.get_tool_cache.call_count, 2)
+        cache_keys = [call.kwargs["cache_key"] for call in history.get_tool_cache.call_args_list]
+        self.assertEqual(len(set(cache_keys)), 2)
+        requested_tools = [call.kwargs["tool_name"] for call in history.get_tool_cache.call_args_list]
+        self.assertEqual(requested_tools, ["daily", "daily"])
+
+        self.assertEqual(history.upsert_tool_cache.call_count, 2)
+        persisted_cache_keys = [call.kwargs["cache_key"] for call in history.upsert_tool_cache.call_args_list]
+        self.assertEqual(len(set(persisted_cache_keys)), 2)
+        persisted_context_keys = [call.kwargs["response_json"]["context_key"] for call in history.upsert_tool_cache.call_args_list]
+        self.assertEqual(persisted_context_keys, ["daily_totals", "daily_totals"])
 
     def test_get_conversation_history_returns_serialized_messages(self) -> None:
         self.history.get_conversation.return_value = ConversationRecord(

@@ -49,6 +49,23 @@ class RagToolSelectionResponse(AnalyticsBaseModel):
     union_tools: list[str] = Field(default_factory=list)
 
 
+class RagPlanStep(AnalyticsBaseModel):
+    step_id: str
+    skill_id: str
+    context_key: str
+    output_key: str
+    label: Optional[str] = None
+    time_scope: Optional[RagTimeScope] = None
+    period: Optional[str] = None
+    payment_method: Optional[str] = None
+    account: Optional[str] = None
+
+
+class RagExecutionPlan(AnalyticsBaseModel):
+    strategy: str
+    steps: list[RagPlanStep] = Field(default_factory=list)
+
+
 class RagCitationResponse(AnalyticsBaseModel):
     source_type: str
     source_ref: str
