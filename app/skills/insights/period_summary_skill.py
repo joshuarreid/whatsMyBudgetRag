@@ -19,6 +19,7 @@ class PeriodSummarySkill(Skill):
     def execute(self, request: SkillRequest) -> SkillResult:
         payload = self.insights.period_summary(
             period=request.period,
+            time_scope=request.time_scope,
             payment_method=request.payment_method,
             account=request.account,
             transaction_id=request.transaction_id,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import date
+from calendar import monthrange
+from datetime import date, timedelta
 import json
 import logging
 import re
@@ -9,7 +10,7 @@ from typing import Any, Optional
 from openai import OpenAI
 
 from app.core.config import get_settings
-from app.models.schemas import RagIntentResponse
+from app.models.schemas import RagIntentResponse, RagTimeScope
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,26 @@ MONTH_OF_PATTERN = re.compile(
     re.IGNORECASE,
 )
 SIMPLE_MONTH_PATTERN = re.compile(rf"^(?P<month>{STATEMENT_PERIOD_MONTH_PATTERN})$", re.IGNORECASE)
+MONTH_RANGE_PATTERN = re.compile(
+    rf"\b(?P<start_month>{STATEMENT_PERIOD_MONTH_PATTERN})(?:\s+(?P<start_year>\d{{4}}))?\s+"
+    rf"(?:through|thru|to|until)\s+"
+    rf"(?P<end_month>{STATEMENT_PERIOD_MONTH_PATTERN})(?:\s+(?P<end_year>\d{{4}}))?\b",
+    re.IGNORECASE,
+)
+END_OF_MONTH_PATTERN = re.compile(
+    rf"\bend\s+of\s+(?P<month>{STATEMENT_PERIOD_MONTH_PATTERN})(?:\s+(?P<year>\d{{4}}))?\b",
+    re.IGNORECASE,
+)
+WEEK_OF_MONTH_PATTERN = re.compile(
+    rf"\b(?P<ordinal>first|1st|second|2nd|third|3rd|fourth|4th|last)\s+week\s+of\s+"
+    rf"(?P<month>{STATEMENT_PERIOD_MONTH_PATTERN})(?:\s+(?P<year>\d{{4}}))?\b",
+    re.IGNORECASE,
+)
+HALF_OF_MONTH_PATTERN = re.compile(
+    rf"\b(?P<half>first|1st|second|2nd|last)\s+half\s+of\s+"
+    rf"(?P<month>{STATEMENT_PERIOD_MONTH_PATTERN})(?:\s+(?P<year>\d{{4}}))?\b",
+    re.IGNORECASE,
+)
 CONTEXTUAL_ACCOUNT_REFERENCE_PATTERN = re.compile(
     r"\b(?:this|that|selected|current|same)\s+account\b",
     re.IGNORECASE,
@@ -89,6 +110,24 @@ GENERIC_ACCOUNT_REFERENCE_VALUES = {
     "new",
     "an",
     "a",
+}
+DAY_REFERENCE_PATTERNS = (
+    (re.compile(r"\btoday\b", re.IGNORECASE), 0, "today resolves to a single-day inclusive date range"),
+    (re.compile(r"\byesterday\b", re.IGNORECASE), -1, "yesterday resolves to a single-day inclusive date range"),
+)
+WEEK_REFERENCE_PATTERNS = (
+    (re.compile(r"\b(?:this|current)\s+week\b", re.IGNORECASE), 0, "current week resolves to the Monday-through-today inclusive date range"),
+    (re.compile(r"\b(?:last|previous)\s+week\b", re.IGNORECASE), -1, "last week resolves to the previous Monday-through-Sunday inclusive date range"),
+)
+WEEK_ORDINAL_LOOKUP = {
+    "first": 1,
+    "1st": 1,
+    "second": 2,
+    "2nd": 2,
+    "third": 3,
+    "3rd": 3,
+    "fourth": 4,
+    "4th": 4,
 }
 
 
@@ -151,20 +190,20 @@ class IntentService:
         )
         return intent
 
-    def infer_period(
+    def infer_time_scope(
         self,
         question: str,
         today: date,
         *,
         llm_intent: Optional[RagIntentResponse] = None,
-    ) -> Optional[dict[str, str]]:
-        question_period = self._infer_period_from_text(question, today=today, source_prefix="question")
-        if question_period is not None:
-            return question_period
+    ) -> Optional[dict[str, Any]]:
+        question_time_scope = self._infer_time_scope_from_text(question, today=today, source_prefix="question")
+        if question_time_scope is not None:
+            return question_time_scope
 
         llm_time_reference = llm_intent.time_reference if llm_intent is not None else None
         if isinstance(llm_time_reference, str) and llm_time_reference.strip():
-            return self._infer_period_from_text(
+            return self._infer_time_scope_from_text(
                 llm_time_reference.strip(),
                 today=today,
                 source_prefix="llm",
@@ -172,6 +211,24 @@ class IntentService:
             )
 
         return None
+
+    def infer_period(
+        self,
+        question: str,
+        today: date,
+        *,
+        llm_intent: Optional[RagIntentResponse] = None,
+    ) -> Optional[dict[str, str]]:
+        inferred_time_scope = self.infer_time_scope(
+            question=question,
+            today=today,
+            llm_intent=llm_intent,
+        )
+        if inferred_time_scope is None:
+            return None
+        if inferred_time_scope.get("scope_type") != "statement_period":
+            return None
+        return inferred_time_scope  # type: ignore[return-value]
 
     def infer_account(
         self,
@@ -199,16 +256,118 @@ class IntentService:
             available_skills_json=json.dumps(available_skills, default=str, indent=2),
         )
 
-    def _infer_period_from_text(
+    def _infer_time_scope_from_text(
         self,
         text: str,
         *,
         today: date,
         source_prefix: str,
         matched_text: Optional[str] = None,
-    ) -> Optional[dict[str, str]]:
+    ) -> Optional[dict[str, Any]]:
         lowered = text.lower()
         current_statement_period = self.format_statement_period(today)
+
+        month_range_match = MONTH_RANGE_PATTERN.search(text)
+        if month_range_match:
+            start_reference = self.resolve_month_reference(
+                month_text=month_range_match.group("start_month"),
+                today=today,
+                year_text=month_range_match.group("start_year"),
+            )
+            end_reference = self.resolve_month_reference(
+                month_text=month_range_match.group("end_month"),
+                today=today,
+                year_text=month_range_match.group("end_year"),
+            )
+            start_period, end_period = self.resolve_statement_period_range(
+                start_reference=start_reference,
+                end_reference=end_reference,
+            )
+            return self._build_time_scope_resolution(
+                source=f"{source_prefix}_statement_period_range",
+                matched_text=matched_text or month_range_match.group(0),
+                time_scope=RagTimeScope(
+                    scope_type="statement_period_range",
+                    start_period=start_period,
+                    end_period=end_period,
+                ),
+                resolution_rule=self._resolution_rule(
+                    source_prefix,
+                    "month-through-month references resolve to an inclusive statement period range",
+                ),
+            )
+
+        week_of_month_match = WEEK_OF_MONTH_PATTERN.search(text)
+        if week_of_month_match:
+            month_reference = self.resolve_month_reference(
+                month_text=week_of_month_match.group("month"),
+                today=today,
+                year_text=week_of_month_match.group("year"),
+            )
+            start_date, end_date = self.resolve_week_of_month_range(
+                month_reference=month_reference,
+                ordinal_text=week_of_month_match.group("ordinal"),
+            )
+            return self._build_time_scope_resolution(
+                source=f"{source_prefix}_week_of_month",
+                matched_text=matched_text or week_of_month_match.group(0),
+                time_scope=RagTimeScope(
+                    scope_type="date_range",
+                    start_date=start_date,
+                    end_date=end_date,
+                ),
+                resolution_rule=self._resolution_rule(
+                    source_prefix,
+                    "week-of-month references resolve to an inclusive date range within the target month",
+                ),
+            )
+
+        half_of_month_match = HALF_OF_MONTH_PATTERN.search(text)
+        if half_of_month_match:
+            month_reference = self.resolve_month_reference(
+                month_text=half_of_month_match.group("month"),
+                today=today,
+                year_text=half_of_month_match.group("year"),
+            )
+            start_date, end_date = self.resolve_half_of_month_range(
+                month_reference=month_reference,
+                half_text=half_of_month_match.group("half"),
+            )
+            return self._build_time_scope_resolution(
+                source=f"{source_prefix}_half_of_month",
+                matched_text=matched_text or half_of_month_match.group(0),
+                time_scope=RagTimeScope(
+                    scope_type="date_range",
+                    start_date=start_date,
+                    end_date=end_date,
+                ),
+                resolution_rule=self._resolution_rule(
+                    source_prefix,
+                    "half-month references resolve to an inclusive date range within the target month",
+                ),
+            )
+
+        end_of_month_match = END_OF_MONTH_PATTERN.search(text)
+        if end_of_month_match:
+            month_reference = self.resolve_month_reference(
+                month_text=end_of_month_match.group("month"),
+                today=today,
+                year_text=end_of_month_match.group("year"),
+            )
+            start_date, end_date = self.resolve_end_of_month_range(month_reference)
+            return self._build_time_scope_resolution(
+                source=f"{source_prefix}_end_of_month",
+                matched_text=matched_text or end_of_month_match.group(0),
+                time_scope=RagTimeScope(
+                    scope_type="date_range",
+                    start_date=start_date,
+                    end_date=end_date,
+                ),
+                resolution_rule=self._resolution_rule(
+                    source_prefix,
+                    "end-of-month references resolve to the last seven days of the target month",
+                ),
+            )
 
         explicit_period_match = EXPLICIT_STATEMENT_PERIOD_PATTERN.search(text)
         if explicit_period_match:
@@ -219,75 +378,125 @@ class IntentService:
                     1,
                 )
             )
-            return {
-                "source": f"{source_prefix}_explicit_period",
-                "matched_text": matched_text or explicit_period_match.group(0),
-                "resolved_period": resolved_period,
-                "resolution_rule": self._resolution_rule(
+            return self._build_time_scope_resolution(
+                source=f"{source_prefix}_explicit_period",
+                matched_text=matched_text or explicit_period_match.group(0),
+                time_scope=RagTimeScope(
+                    scope_type="statement_period",
+                    statement_period=resolved_period,
+                ),
+                resolution_rule=self._resolution_rule(
                     source_prefix,
                     "explicit MonthYear or Month YYYY reference resolved to a statement period",
                 ),
-            }
+            )
+
+        for pattern, offset_days, resolution_rule in DAY_REFERENCE_PATTERNS:
+            day_match = pattern.search(text)
+            if day_match is None:
+                continue
+            resolved_day = today + timedelta(days=offset_days)
+            return self._build_time_scope_resolution(
+                source=f"{source_prefix}_day_reference",
+                matched_text=matched_text or day_match.group(0),
+                time_scope=RagTimeScope(
+                    scope_type="date_range",
+                    start_date=resolved_day,
+                    end_date=resolved_day,
+                ),
+                resolution_rule=self._resolution_rule(source_prefix, resolution_rule),
+            )
+
+        for pattern, week_offset, resolution_rule in WEEK_REFERENCE_PATTERNS:
+            week_match = pattern.search(text)
+            if week_match is None:
+                continue
+            start_date, end_date = self.resolve_relative_week_range(today=today, week_offset=week_offset)
+            return self._build_time_scope_resolution(
+                source=f"{source_prefix}_week_reference",
+                matched_text=matched_text or week_match.group(0),
+                time_scope=RagTimeScope(
+                    scope_type="date_range",
+                    start_date=start_date,
+                    end_date=end_date,
+                ),
+                resolution_rule=self._resolution_rule(source_prefix, resolution_rule),
+            )
 
         if "this period" in lowered or "current period" in lowered:
-            return {
-                "source": f"{source_prefix}_current_period",
-                "matched_text": matched_text or ("this period" if "this period" in lowered else "current period"),
-                "resolved_period": current_statement_period,
-                "resolution_rule": self._resolution_rule(
+            return self._build_time_scope_resolution(
+                source=f"{source_prefix}_current_period",
+                matched_text=matched_text or ("this period" if "this period" in lowered else "current period"),
+                time_scope=RagTimeScope(
+                    scope_type="statement_period",
+                    statement_period=current_statement_period,
+                ),
+                resolution_rule=self._resolution_rule(
                     source_prefix,
                     "current period resolves to the current statement period",
                 ),
-            }
+            )
 
         if "this month" in lowered or "current month" in lowered:
-            return {
-                "source": f"{source_prefix}_current_month",
-                "matched_text": matched_text or ("this month" if "this month" in lowered else "current month"),
-                "resolved_period": current_statement_period,
-                "resolution_rule": self._resolution_rule(
+            return self._build_time_scope_resolution(
+                source=f"{source_prefix}_current_month",
+                matched_text=matched_text or ("this month" if "this month" in lowered else "current month"),
+                time_scope=RagTimeScope(
+                    scope_type="statement_period",
+                    statement_period=current_statement_period,
+                ),
+                resolution_rule=self._resolution_rule(
                     source_prefix,
                     "current month resolves to the current statement period",
                 ),
-            }
+            )
 
         if "last month" in lowered or "previous month" in lowered:
             matched_relative_text = matched_text or ("last month" if "last month" in lowered else "previous month")
-            return {
-                "source": f"{source_prefix}_relative_month",
-                "matched_text": matched_relative_text,
-                "resolved_period": self.format_statement_period(self.shift_month(today, offset=-1)),
-                "resolution_rule": self._resolution_rule(
+            return self._build_time_scope_resolution(
+                source=f"{source_prefix}_relative_month",
+                matched_text=matched_relative_text,
+                time_scope=RagTimeScope(
+                    scope_type="statement_period",
+                    statement_period=self.format_statement_period(self.shift_month(today, offset=-1)),
+                ),
+                resolution_rule=self._resolution_rule(
                     source_prefix,
                     "relative month resolves from the current statement period",
                 ),
-            }
+            )
 
         contextual_month_match = CONTEXTUAL_MONTH_PATTERN.search(text) or MONTH_OF_PATTERN.search(text)
         if contextual_month_match:
             matched_month = contextual_month_match.group("month")
-            return {
-                "source": f"{source_prefix}_bare_month",
-                "matched_text": matched_text or matched_month,
-                "resolved_period": self.resolve_recent_month_reference(matched_month, today),
-                "resolution_rule": self._resolution_rule(
+            return self._build_time_scope_resolution(
+                source=f"{source_prefix}_bare_month",
+                matched_text=matched_text or matched_month,
+                time_scope=RagTimeScope(
+                    scope_type="statement_period",
+                    statement_period=self.resolve_recent_month_reference(matched_month, today),
+                ),
+                resolution_rule=self._resolution_rule(
                     source_prefix,
                     "bare month names resolve to the most recent matching statement period not in the future",
                 ),
-            }
+            )
 
         simple_month_match = SIMPLE_MONTH_PATTERN.search(text.strip())
         if simple_month_match:
             matched_month = simple_month_match.group("month")
-            return {
-                "source": f"{source_prefix}_bare_month",
-                "matched_text": matched_text or matched_month,
-                "resolved_period": self.resolve_recent_month_reference(matched_month, today),
-                "resolution_rule": self._resolution_rule(
+            return self._build_time_scope_resolution(
+                source=f"{source_prefix}_bare_month",
+                matched_text=matched_text or matched_month,
+                time_scope=RagTimeScope(
+                    scope_type="statement_period",
+                    statement_period=self.resolve_recent_month_reference(matched_month, today),
+                ),
+                resolution_rule=self._resolution_rule(
                     source_prefix,
                     "bare month names resolve to the most recent matching statement period not in the future",
                 ),
-            }
+            )
 
         return None
 
@@ -348,16 +557,109 @@ class IntentService:
         return reference_date.strftime("%B%Y")
 
     @staticmethod
+    def _build_time_scope_resolution(
+        *,
+        source: str,
+        matched_text: str,
+        time_scope: RagTimeScope,
+        resolution_rule: str,
+    ) -> dict[str, Any]:
+        resolved = {
+            "source": source,
+            "matched_text": matched_text,
+            "scope_type": time_scope.scope_type,
+            "time_scope": time_scope.model_dump(mode="json", exclude_none=True),
+            "resolution_rule": resolution_rule,
+        }
+        if time_scope.scope_type == "statement_period" and time_scope.statement_period is not None:
+            resolved["resolved_period"] = time_scope.statement_period
+        if time_scope.scope_type == "statement_period_range":
+            if time_scope.start_period is not None:
+                resolved["resolved_start_period"] = time_scope.start_period
+            if time_scope.end_period is not None:
+                resolved["resolved_end_period"] = time_scope.end_period
+        if time_scope.scope_type == "date_range":
+            if time_scope.start_date is not None:
+                resolved["resolved_start_date"] = time_scope.start_date.isoformat()
+            if time_scope.end_date is not None:
+                resolved["resolved_end_date"] = time_scope.end_date.isoformat()
+        return resolved
+
+    @staticmethod
     def shift_month(reference_date: date, offset: int) -> date:
         target_index = reference_date.month - 1 + offset
         target_year = reference_date.year + (target_index // 12)
         target_month = (target_index % 12) + 1
         return date(target_year, target_month, 1)
 
-    def resolve_recent_month_reference(self, month_text: str, today: date) -> str:
+    def resolve_month_reference(
+        self,
+        *,
+        month_text: str,
+        today: date,
+        year_text: Optional[str] = None,
+    ) -> date:
+        if year_text is not None:
+            return date(int(year_text), self.month_number(month_text), 1)
         target_month = self.month_number(month_text)
         target_year = today.year if target_month <= today.month else today.year - 1
-        return self.format_statement_period(date(target_year, target_month, 1))
+        return date(target_year, target_month, 1)
+
+    def resolve_recent_month_reference(self, month_text: str, today: date) -> str:
+        return self.format_statement_period(self.resolve_month_reference(month_text=month_text, today=today))
+
+    def resolve_statement_period_range(self, *, start_reference: date, end_reference: date) -> tuple[str, str]:
+        start_year = start_reference.year
+        if start_reference.month > end_reference.month and start_reference.year >= end_reference.year:
+            start_year = end_reference.year - 1
+        elif start_reference.month <= end_reference.month:
+            start_year = end_reference.year
+        start_period_reference = date(start_year, start_reference.month, 1)
+        end_period_reference = date(end_reference.year, end_reference.month, 1)
+        return (
+            self.format_statement_period(start_period_reference),
+            self.format_statement_period(end_period_reference),
+        )
+
+    @staticmethod
+    def resolve_relative_week_range(*, today: date, week_offset: int) -> tuple[date, date]:
+        current_week_start = today - timedelta(days=today.weekday())
+        week_start = current_week_start + timedelta(weeks=week_offset)
+        week_end = today if week_offset == 0 else week_start + timedelta(days=6)
+        return week_start, week_end
+
+    @staticmethod
+    def resolve_week_of_month_range(*, month_reference: date, ordinal_text: str) -> tuple[date, date]:
+        last_day = monthrange(month_reference.year, month_reference.month)[1]
+        if ordinal_text.lower() == "last":
+            end_date = date(month_reference.year, month_reference.month, last_day)
+            start_date = max(month_reference, end_date - timedelta(days=6))
+            return start_date, end_date
+        ordinal = WEEK_ORDINAL_LOOKUP[ordinal_text.lower()]
+        start_day = ((ordinal - 1) * 7) + 1
+        start_date = date(month_reference.year, month_reference.month, start_day)
+        end_day = min(start_day + 6, last_day)
+        return start_date, date(month_reference.year, month_reference.month, end_day)
+
+    @staticmethod
+    def resolve_half_of_month_range(*, month_reference: date, half_text: str) -> tuple[date, date]:
+        last_day = monthrange(month_reference.year, month_reference.month)[1]
+        midpoint = 15
+        start_date = date(month_reference.year, month_reference.month, 1)
+        if half_text.lower() in {"first", "1st"}:
+            return start_date, date(month_reference.year, month_reference.month, min(midpoint, last_day))
+        return date(month_reference.year, month_reference.month, min(midpoint + 1, last_day)), date(
+            month_reference.year,
+            month_reference.month,
+            last_day,
+        )
+
+    @staticmethod
+    def resolve_end_of_month_range(month_reference: date) -> tuple[date, date]:
+        last_day = monthrange(month_reference.year, month_reference.month)[1]
+        end_date = date(month_reference.year, month_reference.month, last_day)
+        start_date = max(month_reference, end_date - timedelta(days=6))
+        return start_date, end_date
 
     @staticmethod
     def normalize_explicit_account_reference(candidate: Optional[str]) -> Optional[str]:

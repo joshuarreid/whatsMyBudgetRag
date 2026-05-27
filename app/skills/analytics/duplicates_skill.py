@@ -19,11 +19,13 @@ class DuplicatesSkill(Skill):
         self.spring = spring_client
 
     def execute(self, request: SkillRequest) -> SkillResult:
+        if request.time_scope is None:
+            raise ValueError("Duplicates skill requires a resolved time_scope")
         payload = [
             item.model_dump(mode="json")
             for item in normalize_list_response(
-                self.spring.get_duplicates(
-                    period=request.period,
+                self.spring.get_duplicates_for_time_scope(
+                    time_scope=request.time_scope,
                     transaction_id=request.transaction_id,
                 ),
                 AnalyticsDuplicateResponse,

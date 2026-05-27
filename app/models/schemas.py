@@ -11,9 +11,19 @@ class AnalyticsBaseModel(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class RagTimeScope(AnalyticsBaseModel):
+    scope_type: str
+    statement_period: Optional[str] = None
+    start_period: Optional[str] = None
+    end_period: Optional[str] = None
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+
+
 class RagAskRequest(AnalyticsBaseModel):
     question: str = Field(min_length=1)
     conversation_id: Optional[str] = None
+    time_scope: Optional[RagTimeScope] = None
     period: Optional[str] = None
     payment_method: Optional[str] = None
     account: Optional[str] = None
@@ -70,6 +80,7 @@ class RagConversationMessageResponse(AnalyticsBaseModel):
     message_id: str
     role: str
     content: str
+    time_scope: Optional[RagTimeScope] = None
     period: Optional[str] = None
     period_source: Optional[str] = None
     created_at: datetime
@@ -90,7 +101,7 @@ class AnalyticsPeriodsResponse(AnalyticsBaseModel):
 
 
 class AnalyticsPeriodOverviewResponse(AnalyticsBaseModel):
-    statement_period: str = Field(alias="statementPeriod")
+    statement_period: Optional[str] = Field(default=None, alias="statementPeriod")
     payment_method: Optional[str] = Field(default=None, alias="paymentMethod")
     account: Optional[str] = None
     total_amount: Decimal = Field(alias="totalAmount")
@@ -232,7 +243,8 @@ class InsightMonthOverMonthResponse(AnalyticsBaseModel):
 class RagAnswerResponse(AnalyticsBaseModel):
     question: str
     conversation_id: Optional[str] = None
-    period: str
+    time_scope: RagTimeScope
+    period: Optional[str] = None
     plan: list[str] = Field(default_factory=list)
     tool_selection: RagToolSelectionResponse = Field(default_factory=RagToolSelectionResponse)
     context: dict[str, Any] = Field(default_factory=dict)

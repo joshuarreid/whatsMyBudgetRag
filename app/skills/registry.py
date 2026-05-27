@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from time import perf_counter
 from typing import Any, Callable, Optional
@@ -176,6 +177,7 @@ class SkillRegistry:
     @staticmethod
     def _build_tool_arguments(request: SkillRequest) -> dict[str, Any]:
         return {
+            "time_scope": request.time_scope.model_dump(mode="json", exclude_none=True),
             "period": request.period,
             "payment_method": request.payment_method,
             "account": request.account,
@@ -201,10 +203,14 @@ class SkillRegistry:
         return normalized_metadata
 
     def _build_citation(self, skill: Skill, arguments: dict[str, Any], payload: Any) -> dict[str, Any]:
+        time_scope = arguments.get("time_scope")
         period = arguments.get("period")
         payment_method = arguments.get("payment_method")
         account = arguments.get("account")
-        source_ref = f"api://{skill.skill_id}?period={period or '-'}"
+        if isinstance(time_scope, dict) and time_scope:
+            source_ref = f"api://{skill.skill_id}?time_scope={json.dumps(time_scope, sort_keys=True)}"
+        else:
+            source_ref = f"api://{skill.skill_id}?period={period or '-'}"
         if payment_method:
             source_ref += f"&payment_method={payment_method}"
         if account:

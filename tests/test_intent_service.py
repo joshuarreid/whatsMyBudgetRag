@@ -82,27 +82,125 @@ class IntentServiceInferenceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.service = IntentService()
 
-    def test_infer_period_prefers_explicit_question_reference_over_llm_hint(self) -> None:
-        inferred_period = self.service.infer_period(
+    def test_infer_time_scope_prefers_explicit_question_reference_over_llm_hint(self) -> None:
+        inferred_scope = self.service.infer_time_scope(
             question="What was my spend in October?",
             today=date(2026, 5, 22),
             llm_intent=RagIntentResponse(time_reference="this month"),
         )
 
-        self.assertIsNotNone(inferred_period)
-        self.assertEqual(inferred_period["resolved_period"], "October2025")
-        self.assertEqual(inferred_period["source"], "question_bare_month")
+        self.assertIsNotNone(inferred_scope)
+        self.assertEqual(inferred_scope["resolved_period"], "October2025")
+        self.assertEqual(inferred_scope["time_scope"]["scope_type"], "statement_period")
+        self.assertEqual(inferred_scope["source"], "question_bare_month")
 
-    def test_infer_period_uses_llm_time_reference_when_question_has_no_date(self) -> None:
-        inferred_period = self.service.infer_period(
+    def test_infer_time_scope_uses_llm_time_reference_when_question_has_no_date(self) -> None:
+        inferred_scope = self.service.infer_time_scope(
             question="How much did I spend?",
             today=date(2026, 5, 22),
             llm_intent=RagIntentResponse(time_reference="last month"),
         )
 
-        self.assertIsNotNone(inferred_period)
-        self.assertEqual(inferred_period["resolved_period"], "April2026")
-        self.assertEqual(inferred_period["source"], "llm_relative_month")
+        self.assertIsNotNone(inferred_scope)
+        self.assertEqual(inferred_scope["resolved_period"], "April2026")
+        self.assertEqual(inferred_scope["source"], "llm_relative_month")
+
+    def test_infer_time_scope_resolves_bare_month_to_statement_period(self) -> None:
+        inferred_scope = self.service.infer_time_scope(
+            question="Show me my spending for April",
+            today=date(2026, 5, 27),
+        )
+
+        self.assertIsNotNone(inferred_scope)
+        self.assertEqual(inferred_scope["time_scope"], {"scope_type": "statement_period", "statement_period": "April2026"})
+
+    def test_infer_time_scope_resolves_month_range_to_statement_period_range(self) -> None:
+        inferred_scope = self.service.infer_time_scope(
+            question="Compare spending December through March",
+            today=date(2026, 5, 27),
+        )
+
+        self.assertIsNotNone(inferred_scope)
+        self.assertEqual(
+            inferred_scope["time_scope"],
+            {
+                "scope_type": "statement_period_range",
+                "start_period": "December2025",
+                "end_period": "March2026",
+            },
+        )
+
+    def test_infer_time_scope_resolves_end_of_month_to_date_range(self) -> None:
+        inferred_scope = self.service.infer_time_scope(
+            question="How much did I spend at the end of April?",
+            today=date(2026, 5, 27),
+        )
+
+        self.assertIsNotNone(inferred_scope)
+        self.assertEqual(
+            inferred_scope["time_scope"],
+            {
+                "scope_type": "date_range",
+                "start_date": "2026-04-24",
+                "end_date": "2026-04-30",
+            },
+        )
+
+    def test_infer_time_scope_resolves_first_week_of_month_to_date_range(self) -> None:
+        inferred_scope = self.service.infer_time_scope(
+            question="What did I spend in the first week of April?",
+            today=date(2026, 5, 27),
+        )
+
+        self.assertIsNotNone(inferred_scope)
+        self.assertEqual(
+            inferred_scope["time_scope"],
+            {
+                "scope_type": "date_range",
+                "start_date": "2026-04-01",
+                "end_date": "2026-04-07",
+            },
+        )
+
+    def test_infer_time_scope_resolves_first_half_of_month_to_date_range(self) -> None:
+        inferred_scope = self.service.infer_time_scope(
+            question="What was my spend in the first half of April?",
+            today=date(2026, 5, 27),
+        )
+
+        self.assertIsNotNone(inferred_scope)
+        self.assertEqual(
+            inferred_scope["time_scope"],
+            {
+                "scope_type": "date_range",
+                "start_date": "2026-04-01",
+                "end_date": "2026-04-15",
+            },
+        )
+
+    def test_infer_time_scope_resolves_today_to_single_day_date_range(self) -> None:
+        inferred_scope = self.service.infer_time_scope(
+            question="How much did I spend today?",
+            today=date(2026, 5, 27),
+        )
+
+        self.assertIsNotNone(inferred_scope)
+        self.assertEqual(
+            inferred_scope["time_scope"],
+            {
+                "scope_type": "date_range",
+                "start_date": "2026-05-27",
+                "end_date": "2026-05-27",
+            },
+        )
+
+    def test_infer_period_returns_none_for_non_statement_period_time_scopes(self) -> None:
+        inferred_period = self.service.infer_period(
+            question="What did I spend in the first week of April?",
+            today=date(2026, 5, 27),
+        )
+
+        self.assertIsNone(inferred_period)
 
     def test_infer_account_prefers_explicit_question_reference_over_llm_hint(self) -> None:
         inferred_account = self.service.infer_account(

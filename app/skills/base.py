@@ -4,6 +4,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from app.models.schemas import RagTimeScope
+
 
 @dataclass(frozen=True)
 class SkillDefinition:
@@ -19,10 +21,22 @@ class SkillDefinition:
 @dataclass(frozen=True)
 class SkillRequest:
     question: str
-    period: str
+    time_scope: Optional[RagTimeScope] = None
+    period: Optional[str] = None
     payment_method: Optional[str] = None
     account: Optional[str] = None
     transaction_id: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.time_scope is not None:
+            return
+        if self.period is None:
+            raise ValueError("SkillRequest requires either time_scope or period")
+        object.__setattr__(
+            self,
+            "time_scope",
+            RagTimeScope(scope_type="statement_period", statement_period=self.period),
+        )
 
 
 @dataclass

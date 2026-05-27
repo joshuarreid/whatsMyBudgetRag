@@ -16,6 +16,7 @@ from app.models.schemas import (
     RagConversationMessageResponse,
     RagConversationResponse,
     RagIntentResponse,
+    RagTimeScope,
     RagToolTraceResponse,
 )
 from app.repositories import (
@@ -59,14 +60,17 @@ class RAGService:
         self,
         question: str,
         conversation_id: Optional[str] = None,
+        time_scope: Optional[RagTimeScope] = None,
         period: Optional[str] = None,
         payment_method: Optional[str] = None,
         account: Optional[str] = None,
         transaction_id: Optional[str] = None,
     ) -> RagAnswerResponse:
+        requested_time_scope = self._normalize_time_scope_input(time_scope=time_scope, period=period)
         logger.info(
-            "RAG answer requested requested_period=%s payment_method=%s account=%s transaction_id=%s question_length=%s",
+            "RAG answer requested requested_period=%s requested_time_scope=%s payment_method=%s account=%s transaction_id=%s question_length=%s",
             period or "-",
+            requested_time_scope.model_dump(mode="json", exclude_none=True) if requested_time_scope is not None else {},
             payment_method or "-",
             account or "-",
             transaction_id or "-",
@@ -81,16 +85,19 @@ class RAGService:
                 resolved_conversation_id,
                 role="user",
                 content=question,
+                period=self._derive_period_from_time_scope(requested_time_scope),
                 transaction_id=transaction_id,
             )
             llm_intent = self._classify_intent(question)
-            selected_period, period_interpretation = self._resolve_period(
+            selected_time_scope, period_interpretation = self._resolve_time_scope(
                 question=question,
+                time_scope=requested_time_scope,
                 period=period,
                 transaction_id=transaction_id,
                 conversation_history=prior_messages,
                 llm_intent=llm_intent,
             )
+            selected_period = self._derive_period_from_time_scope(selected_time_scope)
             selected_account, account_interpretation = self._resolve_account(
                 question=question,
                 account=account,
@@ -100,8 +107,9 @@ class RAGService:
             selected_skills, routing_metadata = self._select_skills(question, llm_intent=llm_intent)
             plan = [skill.skill_id for skill in selected_skills]
             logger.info(
-                "RAG execution plan selected period=%s account=%s plan=%s period_source=%s account_source=%s routing_source=%s",
-                selected_period,
+                "RAG execution plan selected period=%s time_scope=%s account=%s plan=%s period_source=%s account_source=%s routing_source=%s",
+                selected_period or "-",
+                selected_time_scope.model_dump(mode="json", exclude_none=True),
                 selected_account or "-",
                 plan,
                 period_interpretation.get("source", "unknown"),
@@ -110,6 +118,7 @@ class RAGService:
             )
             skill_request = SkillRequest(
                 question=question,
+                time_scope=selected_time_scope,
                 period=selected_period,
                 payment_method=payment_method,
                 account=selected_account,
@@ -140,6 +149,7 @@ class RAGService:
                 answer_json={
                     "question": question,
                     "conversation_id": resolved_conversation_id,
+                    "time_scope": selected_time_scope.model_dump(mode="json", exclude_none=True),
                     "period": selected_period,
                     "period_source": period_interpretation.get("source"),
                     "resolved_filters": {
@@ -166,14 +176,16 @@ class RAGService:
                 period=selected_period,
             )
             logger.info(
-                "RAG answer completed period=%s context_keys=%s used_llm=%s",
-                selected_period,
+                "RAG answer completed period=%s time_scope=%s context_keys=%s used_llm=%s",
+                selected_period or "-",
+                selected_time_scope.model_dump(mode="json", exclude_none=True),
                 sorted(context.keys()),
                 bool(llm_answer),
             )
             return RagAnswerResponse(
                 question=question,
                 conversation_id=resolved_conversation_id,
+                time_scope=selected_time_scope,
                 period=selected_period,
                 plan=plan,
                 tool_selection=routing_metadata.get("tool_selection", {}),
@@ -208,6 +220,72 @@ class RAGService:
             messages=[self._message_response(message) for message in messages],
         )
 
+    def _resolve_time_scope(
+        self,
+        question: str,
+        time_scope: Optional[RagTimeScope],
+        period: Optional[str],
+        transaction_id: Optional[str],
+        *,
+        conversation_history: Optional[list[ConversationMessageRecord]] = None,
+        llm_intent: Optional[RagIntentResponse] = None,
+        today: Optional[date] = None,
+    ) -> tuple[RagTimeScope, dict[str, Any]]:
+        reference_date = today or date.today()
+        inferred_time_scope = self.intent_parser.infer_time_scope(
+            question=question,
+            today=reference_date,
+            llm_intent=llm_intent,
+        )
+        if inferred_time_scope is not None:
+            resolved_time_scope = RagTimeScope.model_validate(inferred_time_scope["time_scope"])
+            logger.debug(
+                "Resolved analytics time scope from question matched_text=%s time_scope=%s",
+                inferred_time_scope.get("matched_text"),
+                resolved_time_scope.model_dump(mode="json", exclude_none=True),
+            )
+            return resolved_time_scope, inferred_time_scope
+
+        prior_time_scope = self._last_resolved_time_scope(conversation_history)
+        if prior_time_scope is not None:
+            logger.debug(
+                "Reusing prior conversation analytics time_scope=%s",
+                prior_time_scope.model_dump(mode="json", exclude_none=True),
+            )
+            return prior_time_scope, self._build_time_scope_interpretation(
+                source="conversation_history_time_scope",
+                matched_text=self._time_scope_label(prior_time_scope),
+                time_scope=prior_time_scope,
+                resolution_rule="follow-up questions without a new time reference reuse the last resolved time scope from the conversation",
+            )
+
+        if time_scope is not None:
+            logger.debug(
+                "Using requested analytics time_scope=%s",
+                time_scope.model_dump(mode="json", exclude_none=True),
+            )
+            return time_scope, self._build_time_scope_interpretation(
+                source="request_time_scope" if period is None else "request_parameter",
+                matched_text=self._time_scope_label(time_scope),
+                time_scope=time_scope,
+                resolution_rule="request time_scope overrides the default fallback when the question and conversation do not introduce a new time reference",
+            )
+
+        resolved_time_scope = RagTimeScope(
+            scope_type="statement_period",
+            statement_period=self.intent_parser.format_statement_period(reference_date),
+        )
+        logger.debug(
+            "Falling back to current statement period=%s",
+            resolved_time_scope.statement_period,
+        )
+        return resolved_time_scope, self._build_time_scope_interpretation(
+            source="current_statement_period_fallback",
+            matched_text=resolved_time_scope.statement_period or "",
+            time_scope=resolved_time_scope,
+            resolution_rule="questions without a time reference fall back to the current statement period",
+        )
+
     def _resolve_period(
         self,
         question: str,
@@ -217,47 +295,17 @@ class RAGService:
         conversation_history: Optional[list[ConversationMessageRecord]] = None,
         llm_intent: Optional[RagIntentResponse] = None,
         today: Optional[date] = None,
-    ) -> tuple[str, dict[str, str]]:
-        reference_date = today or date.today()
-        inferred_period = self.intent_parser.infer_period(
+    ) -> tuple[Optional[str], dict[str, Any]]:
+        resolved_time_scope, interpretation = self._resolve_time_scope(
             question=question,
-            today=reference_date,
+            time_scope=None,
+            period=period,
+            transaction_id=transaction_id,
+            conversation_history=conversation_history,
             llm_intent=llm_intent,
+            today=today,
         )
-        if inferred_period is not None:
-            logger.debug(
-                "Resolved analytics period from question matched_text=%s resolved_period=%s",
-                inferred_period.get("matched_text"),
-                inferred_period["resolved_period"],
-            )
-            return inferred_period["resolved_period"], inferred_period
-
-        prior_period = self._last_resolved_period(conversation_history)
-        if prior_period is not None:
-            logger.debug("Reusing prior conversation analytics period=%s", prior_period)
-            return prior_period, {
-                "source": "conversation_history_period",
-                "matched_text": prior_period,
-                "resolved_period": prior_period,
-                "resolution_rule": "follow-up questions without a new time reference reuse the last resolved statement period from the conversation",
-            }
-
-        if period:
-            logger.debug("Using requested analytics period=%s", period)
-            return period, {
-                "source": "request_parameter",
-                "matched_text": period,
-                "resolved_period": period,
-            }
-
-        resolved_period = self.intent_parser.format_statement_period(reference_date)
-        logger.debug("Falling back to current statement period=%s", resolved_period)
-        return resolved_period, {
-            "source": "current_statement_period_fallback",
-            "matched_text": resolved_period,
-            "resolved_period": resolved_period,
-            "resolution_rule": "questions without a time reference fall back to the current statement period",
-        }
+        return self._derive_period_from_time_scope(resolved_time_scope), interpretation
 
     def _resolve_account(
         self,
@@ -319,7 +367,7 @@ class RAGService:
         self,
         skill_request: SkillRequest,
         plan: list[str],
-        period_interpretation: dict[str, str],
+        period_interpretation: dict[str, Any],
         account_interpretation: dict[str, Optional[str]],
         skills: list[Skill],
         routing_metadata: dict[str, Any],
@@ -328,11 +376,12 @@ class RAGService:
         conversation_history: Optional[list[ConversationMessageRecord]] = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
         timeline_context = self._build_timeline_context(
-            period=skill_request.period,
+            time_scope=skill_request.time_scope,
             period_interpretation=period_interpretation,
         )
         context: dict[str, Any] = {
             "question": skill_request.question,
+            "time_scope": skill_request.time_scope.model_dump(mode="json", exclude_none=True),
             "period": skill_request.period,
             "filters": {
                 "payment_method": skill_request.payment_method,
@@ -360,6 +409,9 @@ class RAGService:
                     "message_id": message.message_id,
                     "role": message.role,
                     "content": message.content,
+                    "time_scope": self._message_time_scope(message).model_dump(mode="json", exclude_none=True)
+                    if self._message_time_scope(message) is not None
+                    else None,
                     "period": message.period,
                     "period_source": message.period_source,
                     "filters": self._message_resolved_filters(message),
@@ -451,24 +503,40 @@ class RAGService:
 
     def _build_timeline_context(
         self,
-        period: str,
-        period_interpretation: dict[str, str],
+        time_scope: RagTimeScope,
+        period_interpretation: dict[str, Any],
         *,
         today: Optional[date] = None,
     ) -> dict[str, Any]:
         reference_date = today or date.today()
         current_statement_period = self.intent_parser.format_statement_period(reference_date)
+        derived_period = self._derive_period_from_time_scope(time_scope)
         return {
             "current_date": reference_date.isoformat(),
             "current_month": current_statement_period,
             "current_statement_period": current_statement_period,
-            "selected_statement_period": period,
+            "selected_time_scope": time_scope.model_dump(mode="json", exclude_none=True),
+            "selected_statement_period": derived_period,
+            "selected_statement_period_range": {
+                "start_period": time_scope.start_period,
+                "end_period": time_scope.end_period,
+            }
+            if time_scope.scope_type == "statement_period_range"
+            else None,
+            "selected_date_range": {
+                "start_date": time_scope.start_date.isoformat() if time_scope.start_date is not None else None,
+                "end_date": time_scope.end_date.isoformat() if time_scope.end_date is not None else None,
+            }
+            if time_scope.scope_type == "date_range"
+            else None,
             "statement_period_format": "MonthYear",
             "statement_period_examples": ["October2025", "May2026"],
             "period_resolution_rules": {
                 "bare_month_name": "Resolve to the most recent matching month not in the future relative to current_statement_period.",
                 "current_month": "Resolve to current_statement_period.",
                 "last_month": "Resolve to the statement period immediately before current_statement_period.",
+                "month_range": "Resolve to an inclusive statement period range between the referenced months.",
+                "date_range": "Resolve to inclusive ISO date boundaries when the question uses week, day, or partial-month phrasing.",
             },
             "selection_source": period_interpretation.get("source", "unknown"),
         }
@@ -499,6 +567,94 @@ class RAGService:
         return conversation_id, messages
 
     @staticmethod
+    def _normalize_time_scope_input(
+        *,
+        time_scope: Optional[Any],
+        period: Optional[str],
+    ) -> Optional[RagTimeScope]:
+        if isinstance(time_scope, RagTimeScope):
+            return time_scope
+        if isinstance(time_scope, dict):
+            return RagTimeScope.model_validate(time_scope)
+        if isinstance(period, str) and period.strip():
+            return RagTimeScope(scope_type="statement_period", statement_period=period.strip())
+        return None
+
+    @staticmethod
+    def _derive_period_from_time_scope(time_scope: Optional[RagTimeScope]) -> Optional[str]:
+        if time_scope is None:
+            return None
+        if time_scope.scope_type == "statement_period":
+            return time_scope.statement_period
+        return None
+
+    def _build_time_scope_interpretation(
+        self,
+        *,
+        source: str,
+        matched_text: str,
+        time_scope: RagTimeScope,
+        resolution_rule: Optional[str] = None,
+    ) -> dict[str, Any]:
+        interpretation: dict[str, Any] = {
+            "source": source,
+            "matched_text": matched_text,
+            "scope_type": time_scope.scope_type,
+            "time_scope": time_scope.model_dump(mode="json", exclude_none=True),
+        }
+        derived_period = self._derive_period_from_time_scope(time_scope)
+        if derived_period is not None:
+            interpretation["resolved_period"] = derived_period
+        if time_scope.start_period is not None:
+            interpretation["resolved_start_period"] = time_scope.start_period
+        if time_scope.end_period is not None:
+            interpretation["resolved_end_period"] = time_scope.end_period
+        if time_scope.start_date is not None:
+            interpretation["resolved_start_date"] = time_scope.start_date.isoformat()
+        if time_scope.end_date is not None:
+            interpretation["resolved_end_date"] = time_scope.end_date.isoformat()
+        if resolution_rule is not None:
+            interpretation["resolution_rule"] = resolution_rule
+        return interpretation
+
+    @staticmethod
+    def _time_scope_label(time_scope: RagTimeScope) -> str:
+        if time_scope.scope_type == "statement_period":
+            return time_scope.statement_period or "statement period"
+        if time_scope.scope_type == "statement_period_range":
+            return f"{time_scope.start_period or '?'} through {time_scope.end_period or '?'}"
+        if time_scope.scope_type == "date_range":
+            return f"{time_scope.start_date.isoformat() if time_scope.start_date else '?'} through {time_scope.end_date.isoformat() if time_scope.end_date else '?'}"
+        return time_scope.scope_type
+
+    def _last_resolved_time_scope(
+        self,
+        conversation_history: Optional[list[ConversationMessageRecord]],
+    ) -> Optional[RagTimeScope]:
+        if not conversation_history:
+            return None
+        for message in reversed(conversation_history):
+            if message.role != "assistant":
+                continue
+            resolved_time_scope = self._message_time_scope(message)
+            if resolved_time_scope is not None:
+                return resolved_time_scope
+        return None
+
+    def _message_time_scope(self, message: ConversationMessageRecord) -> Optional[RagTimeScope]:
+        answer_json = message.answer_json if isinstance(message.answer_json, dict) else {}
+        for container in (answer_json, message.context_json if isinstance(message.context_json, dict) else {}):
+            time_scope_payload = container.get("time_scope") if isinstance(container, dict) else None
+            if isinstance(time_scope_payload, dict):
+                try:
+                    return RagTimeScope.model_validate(time_scope_payload)
+                except Exception:
+                    logger.debug("Ignoring invalid persisted time_scope payload for message=%s", message.message_id)
+        if isinstance(message.period, str) and message.period.strip():
+            return RagTimeScope(scope_type="statement_period", statement_period=message.period.strip())
+        return None
+
+    @staticmethod
     def _last_resolved_period(
         conversation_history: Optional[list[ConversationMessageRecord]],
     ) -> Optional[str]:
@@ -507,6 +663,12 @@ class RAGService:
         for message in reversed(conversation_history):
             if message.role != "assistant":
                 continue
+            answer_json = message.answer_json if isinstance(message.answer_json, dict) else {}
+            time_scope_payload = answer_json.get("time_scope")
+            if isinstance(time_scope_payload, dict):
+                statement_period = time_scope_payload.get("statement_period")
+                if isinstance(statement_period, str) and statement_period.strip():
+                    return statement_period.strip()
             if isinstance(message.period, str) and message.period.strip():
                 return message.period.strip()
         return None
@@ -581,7 +743,7 @@ class RAGService:
         tool_traces: list[dict[str, Any]],
         citations: list[dict[str, Any]],
         cache_metadata: dict[str, Any],
-        period: str,
+        period: Optional[str],
     ) -> None:
         if assistant_message is None or conversation_id is None:
             return
@@ -736,10 +898,22 @@ class RAGService:
 
     @staticmethod
     def _message_response(message: ConversationMessageRecord) -> RagConversationMessageResponse:
+        time_scope_payload = None
+        answer_json = message.answer_json if isinstance(message.answer_json, dict) else {}
+        if isinstance(answer_json.get("time_scope"), dict):
+            time_scope_payload = answer_json.get("time_scope")
+        elif isinstance(message.context_json, dict) and isinstance(message.context_json.get("time_scope"), dict):
+            time_scope_payload = message.context_json.get("time_scope")
+        elif isinstance(message.period, str) and message.period.strip():
+            time_scope_payload = {
+                "scope_type": "statement_period",
+                "statement_period": message.period.strip(),
+            }
         return RagConversationMessageResponse(
             message_id=message.message_id,
             role=message.role,
             content=message.content,
+            time_scope=RagTimeScope.model_validate(time_scope_payload) if isinstance(time_scope_payload, dict) else None,
             period=message.period,
             period_source=message.period_source,
             created_at=message.created_at,
@@ -748,12 +922,18 @@ class RAGService:
 
     def _fallback_answer(self, context: dict[str, Any]) -> str:
         fragments: list[str] = []
+        selected_scope_label = context.get("period") or self._time_scope_label(
+            RagTimeScope.model_validate(context.get("time_scope", {"scope_type": "statement_period"}))
+        )
         overview = context.get("overview")
         if isinstance(overview, dict):
             total_spend = overview.get("total_amount")
             transaction_count = overview.get("transaction_count")
             if total_spend is not None:
-                fragments.append(f"Total spend for period {context.get('period')} is {total_spend}.")
+                if context.get("period"):
+                    fragments.append(f"Total spend for period {context.get('period')} is {total_spend}.")
+                else:
+                    fragments.append(f"Total spend for {selected_scope_label} is {total_spend}.")
             if transaction_count is not None:
                 fragments.append(f"Transaction count is {transaction_count}.")
 

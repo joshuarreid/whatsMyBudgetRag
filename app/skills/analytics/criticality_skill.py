@@ -19,11 +19,13 @@ class CriticalitySkill(Skill):
         self.spring = spring_client
 
     def execute(self, request: SkillRequest) -> SkillResult:
+        if request.time_scope is None:
+            raise ValueError("Criticality skill requires a resolved time_scope")
         payload = [
             item.model_dump(mode="json")
             for item in normalize_list_response(
-                self.spring.get_criticality_breakdown(
-                    period=request.period,
+                self.spring.get_criticality_breakdown_for_time_scope(
+                    time_scope=request.time_scope,
                     payment_method=request.payment_method,
                     account=request.account,
                     transaction_id=request.transaction_id,

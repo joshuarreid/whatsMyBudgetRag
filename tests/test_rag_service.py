@@ -5,6 +5,7 @@ from datetime import date, datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+from app.models.schemas import RagTimeScope
 from app.repositories import ConversationMessageRecord, ConversationRecord
 from app.services.rag_service import RAGService
 
@@ -15,59 +16,64 @@ class RAGServicePeriodResolutionTests(unittest.TestCase):
         self.service = RAGService(self.spring, Mock(), None)
 
     def test_explicit_question_period_overrides_requested_period(self) -> None:
-        resolved_period, interpretation = self.service._resolve_period(
+        resolved_time_scope, interpretation = self.service._resolve_time_scope(
             question="What was my spend in October?",
+            time_scope=RagTimeScope(scope_type="statement_period", statement_period="February2026"),
             period="February2026",
             transaction_id=None,
             today=date(2026, 5, 22),
         )
 
-        self.assertEqual(resolved_period, "October2025")
+        self.assertEqual(resolved_time_scope.statement_period, "October2025")
         self.assertEqual(interpretation["source"], "question_bare_month")
 
     def test_bare_month_resolves_to_most_recent_matching_period(self) -> None:
-        resolved_period, interpretation = self.service._resolve_period(
+        resolved_time_scope, interpretation = self.service._resolve_time_scope(
             question="What was my spend in October?",
+            time_scope=None,
             period=None,
             transaction_id=None,
             today=date(2026, 5, 22),
         )
 
-        self.assertEqual(resolved_period, "October2025")
+        self.assertEqual(resolved_time_scope.statement_period, "October2025")
         self.assertEqual(interpretation["matched_text"], "October")
         self.assertEqual(interpretation["source"], "question_bare_month")
 
     def test_relative_month_resolves_from_current_statement_period(self) -> None:
-        resolved_period, interpretation = self.service._resolve_period(
+        resolved_time_scope, interpretation = self.service._resolve_time_scope(
             question="What was my spend last month?",
+            time_scope=None,
             period=None,
             transaction_id=None,
             today=date(2026, 5, 22),
         )
 
-        self.assertEqual(resolved_period, "April2026")
+        self.assertEqual(resolved_time_scope.statement_period, "April2026")
         self.assertEqual(interpretation["matched_text"], "last month")
         self.assertEqual(interpretation["source"], "question_relative_month")
 
     def test_current_period_phrase_stays_on_current_statement_period(self) -> None:
-        resolved_period, interpretation = self.service._resolve_period(
+        resolved_time_scope, interpretation = self.service._resolve_time_scope(
             question="Compare this period versus last month.",
+            time_scope=None,
             period=None,
             transaction_id=None,
             today=date(2026, 5, 22),
         )
 
-        self.assertEqual(resolved_period, "May2026")
+        self.assertEqual(resolved_time_scope.statement_period, "May2026")
         self.assertEqual(interpretation["matched_text"], "this period")
         self.assertEqual(interpretation["source"], "question_current_period")
 
     def test_build_timeline_context_includes_current_statement_period(self) -> None:
         timeline_context = self.service._build_timeline_context(
-            period="October2025",
+            time_scope=RagTimeScope(scope_type="statement_period", statement_period="October2025"),
             period_interpretation={
                 "source": "question_bare_month",
                 "matched_text": "October",
                 "resolved_period": "October2025",
+                "time_scope": {"scope_type": "statement_period", "statement_period": "October2025"},
             },
             today=date(2026, 5, 22),
         )
@@ -75,25 +81,31 @@ class RAGServicePeriodResolutionTests(unittest.TestCase):
         self.assertEqual(timeline_context["current_date"], "2026-05-22")
         self.assertEqual(timeline_context["current_month"], "May2026")
         self.assertEqual(timeline_context["current_statement_period"], "May2026")
+        self.assertEqual(
+            timeline_context["selected_time_scope"],
+            {"scope_type": "statement_period", "statement_period": "October2025"},
+        )
         self.assertEqual(timeline_context["selected_statement_period"], "October2025")
         self.assertEqual(timeline_context["statement_period_format"], "MonthYear")
         self.assertEqual(timeline_context["selection_source"], "question_bare_month")
 
     def test_current_statement_period_is_used_when_question_has_no_time_reference(self) -> None:
-        resolved_period, interpretation = self.service._resolve_period(
+        resolved_time_scope, interpretation = self.service._resolve_time_scope(
             question="What was my total spend?",
+            time_scope=None,
             period=None,
             transaction_id=None,
             today=date(2026, 5, 22),
         )
 
-        self.assertEqual(resolved_period, "May2026")
+        self.assertEqual(resolved_time_scope.statement_period, "May2026")
         self.assertEqual(interpretation["source"], "current_statement_period_fallback")
         self.assertEqual(self.spring.get_periods.call_count, 0)
 
     def test_prior_conversation_period_is_used_when_question_has_no_time_reference(self) -> None:
-        resolved_period, interpretation = self.service._resolve_period(
+        resolved_time_scope, interpretation = self.service._resolve_time_scope(
             question="What about categories?",
+            time_scope=None,
             period=None,
             transaction_id=None,
             conversation_history=[
@@ -109,20 +121,52 @@ class RAGServicePeriodResolutionTests(unittest.TestCase):
             today=date(2026, 5, 22),
         )
 
-        self.assertEqual(resolved_period, "December2025")
-        self.assertEqual(interpretation["source"], "conversation_history_period")
+        self.assertEqual(resolved_time_scope.statement_period, "December2025")
+        self.assertEqual(interpretation["source"], "conversation_history_time_scope")
 
     def test_requested_period_is_used_when_question_and_conversation_have_no_period(self) -> None:
-        resolved_period, interpretation = self.service._resolve_period(
+        resolved_time_scope, interpretation = self.service._resolve_time_scope(
             question="What was my total spend?",
+            time_scope=RagTimeScope(scope_type="statement_period", statement_period="May2026"),
             period="May2026",
             transaction_id=None,
             conversation_history=[],
             today=date(2026, 5, 22),
         )
 
-        self.assertEqual(resolved_period, "May2026")
+        self.assertEqual(resolved_time_scope.statement_period, "May2026")
         self.assertEqual(interpretation["source"], "request_parameter")
+
+    def test_date_range_follow_up_reuses_prior_time_scope(self) -> None:
+        resolved_time_scope, interpretation = self.service._resolve_time_scope(
+            question="What about categories?",
+            time_scope=None,
+            period=None,
+            transaction_id=None,
+            conversation_history=[
+                ConversationMessageRecord(
+                    message_id="msg-1",
+                    role="assistant",
+                    content="April first week answer",
+                    period=None,
+                    period_source="question_week_of_month",
+                    answer_json={
+                        "time_scope": {
+                            "scope_type": "date_range",
+                            "start_date": "2026-04-01",
+                            "end_date": "2026-04-07",
+                        }
+                    },
+                    created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+                )
+            ],
+            today=date(2026, 5, 22),
+        )
+
+        self.assertEqual(resolved_time_scope.scope_type, "date_range")
+        self.assertEqual(resolved_time_scope.start_date.isoformat(), "2026-04-01")
+        self.assertEqual(resolved_time_scope.end_date.isoformat(), "2026-04-07")
+        self.assertEqual(interpretation["source"], "conversation_history_time_scope")
 
 
 class RAGServiceAccountResolutionTests(unittest.TestCase):
@@ -243,6 +287,7 @@ class RAGServiceConversationHistoryTests(unittest.TestCase):
                     "cache_hit": False,
                     "cacheable": True,
                     "arguments": {
+                        "time_scope": {"scope_type": "statement_period", "statement_period": "May2026"},
                         "period": "May2026",
                         "payment_method": None,
                         "account": None,
@@ -379,12 +424,20 @@ class RAGServiceConversationHistoryTests(unittest.TestCase):
                 period="December2025",
                 period_source="question_bare_month",
                 context_json={
+                    "time_scope": {
+                        "scope_type": "statement_period",
+                        "statement_period": "December2025",
+                    },
                     "filters": {
                         "payment_method": None,
                         "account": "Travel Card",
                     }
                 },
                 answer_json={
+                    "time_scope": {
+                        "scope_type": "statement_period",
+                        "statement_period": "December2025",
+                    },
                     "resolved_filters": {
                         "payment_method": None,
                         "account": "Travel Card",
@@ -421,11 +474,17 @@ class RAGServiceConversationHistoryTests(unittest.TestCase):
         )
 
         request = self.registry.execute.call_args.args[1]
+        self.assertEqual(request.time_scope.statement_period, "December2025")
         self.assertEqual(request.period, "December2025")
         self.assertEqual(request.account, "Travel Card")
         self.assertEqual(response.period, "December2025")
+        self.assertEqual(response.time_scope.statement_period, "December2025")
         assistant_call = self.history.append_message.call_args_list[1]
         self.assertEqual(assistant_call.kwargs["period"], "December2025")
+        self.assertEqual(
+            assistant_call.kwargs["answer_json"]["time_scope"],
+            {"scope_type": "statement_period", "statement_period": "December2025"},
+        )
         self.assertEqual(assistant_call.kwargs["answer_json"]["resolved_filters"]["account"], "Travel Card")
 
     def test_answer_uses_conversation_cache_for_repeated_tool_requests(self) -> None:
@@ -475,6 +534,7 @@ class RAGServiceConversationHistoryTests(unittest.TestCase):
 
         def execute_with_cache(skills, request, cache_lookup=None):
             arguments = {
+                "time_scope": request.time_scope.model_dump(mode="json", exclude_none=True),
                 "period": request.period,
                 "payment_method": request.payment_method,
                 "account": request.account,
@@ -527,6 +587,12 @@ class RAGServiceConversationHistoryTests(unittest.TestCase):
                 content="You spent 42.",
                 period="May2026",
                 period_source="request_parameter",
+                answer_json={
+                    "time_scope": {
+                        "scope_type": "statement_period",
+                        "statement_period": "May2026",
+                    }
+                },
                 created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
             )
         ]
@@ -536,6 +602,7 @@ class RAGServiceConversationHistoryTests(unittest.TestCase):
         self.history.list_messages.assert_called_once_with("conv-789", limit=25)
         self.assertEqual(response.conversation_id, "conv-789")
         self.assertEqual(response.messages[0].message_id, "msg-2")
+        self.assertEqual(response.messages[0].time_scope.statement_period, "May2026")
 
 
 if __name__ == "__main__":

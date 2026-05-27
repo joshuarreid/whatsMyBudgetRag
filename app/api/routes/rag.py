@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -20,6 +21,7 @@ from app.services.rag_service import RAGService
 from app.skills.factories import build_skill_registry
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @lru_cache(maxsize=1)
@@ -44,15 +46,19 @@ def ask(
     request: RagAskRequest,
     rag_service: RAGService = Depends(get_rag_service),
 ) -> RagAnswerResponse:
+    logger.info("RAG ask request payload=%s", request.model_dump(mode="json", exclude_none=True))
     try:
-        return rag_service.answer(
+        response = rag_service.answer(
             question=request.question,
             conversation_id=request.conversation_id,
+            time_scope=request.time_scope,
             period=request.period,
             payment_method=request.payment_method,
             account=request.account,
             transaction_id=request.transaction_id,
         )
+        logger.info("RAG ask response payload=%s", response.model_dump(mode="json", exclude_none=True))
+        return response
     except ConversationNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ConversationHistoryDisabledError as exc:
@@ -65,8 +71,14 @@ def get_conversation(
     limit: int = Query(default=50, ge=1, le=200),
     rag_service: RAGService = Depends(get_rag_service),
 ) -> RagConversationResponse:
+    logger.info(
+        "RAG conversation request payload=%s",
+        {"conversation_id": conversation_id, "limit": limit},
+    )
     try:
-        return rag_service.get_conversation_history(conversation_id, limit=limit)
+        response = rag_service.get_conversation_history(conversation_id, limit=limit)
+        logger.info("RAG conversation response payload=%s", response.model_dump(mode="json", exclude_none=True))
+        return response
     except ConversationNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ConversationHistoryDisabledError as exc:

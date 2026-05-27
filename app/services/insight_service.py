@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Optional, Union
+from typing import Optional, Union, cast
 
 from app.clients.spring_boot_client import SpringBootClient
 from app.core.config import get_settings
@@ -22,6 +22,7 @@ from app.models.schemas import (
     InsightMonthOverMonthResponse,
     InsightPaymentMethodSummary,
     InsightPeriodSummaryResponse,
+    RagTimeScope,
 )
 from app.services.analytics_service import AnalyticsService
 from app.services.normalizers import normalize_list_response, normalize_periods_response
@@ -43,50 +44,67 @@ class InsightService:
 
     def period_summary(
         self,
-        period: str,
+        period: Optional[str] = None,
+        *,
+        time_scope: Optional[RagTimeScope] = None,
         payment_method: Optional[str] = None,
         account: Optional[str] = None,
         transaction_id: Optional[str] = None,
     ) -> InsightPeriodSummaryResponse:
+        resolved_time_scope = self._resolve_time_scope(period=period, time_scope=time_scope)
+        scope_label = self._time_scope_label(resolved_time_scope)
         overview = self.analytics.period_overview(
             period=period,
+            time_scope=resolved_time_scope,
             payment_method=payment_method,
             account=account,
             transaction_id=transaction_id,
         )
-        categories = normalize_list_response(
-            self.client.get_top_categories(
-                period=period,
-                limit=5,
-                payment_method=payment_method,
-                account=account,
-                transaction_id=transaction_id,
+        categories = cast(
+            list[AnalyticsCategoryBreakdownResponse],
+            normalize_list_response(
+                self.client.get_top_categories_for_time_scope(
+                    time_scope=resolved_time_scope,
+                    limit=5,
+                    payment_method=payment_method,
+                    account=account,
+                    transaction_id=transaction_id,
+                ),
+                AnalyticsCategoryBreakdownResponse,
             ),
-            AnalyticsCategoryBreakdownResponse,
         )
-        accounts = normalize_list_response(
-            self.client.get_account_breakdown(
-                period=period,
-                payment_method=payment_method,
-                transaction_id=transaction_id,
+        accounts = cast(
+            list[AnalyticsAccountBreakdownResponse],
+            normalize_list_response(
+                self.client.get_account_breakdown_for_time_scope(
+                    time_scope=resolved_time_scope,
+                    payment_method=payment_method,
+                    transaction_id=transaction_id,
+                ),
+                AnalyticsAccountBreakdownResponse,
             ),
-            AnalyticsAccountBreakdownResponse,
         )
-        payment_methods = normalize_list_response(
-            self.client.get_payment_method_breakdown(
-                period=period,
-                account=account,
-                transaction_id=transaction_id,
+        payment_methods = cast(
+            list[AnalyticsPaymentMethodBreakdownResponse],
+            normalize_list_response(
+                self.client.get_payment_method_breakdown_for_time_scope(
+                    time_scope=resolved_time_scope,
+                    account=account,
+                    transaction_id=transaction_id,
+                ),
+                AnalyticsPaymentMethodBreakdownResponse,
             ),
-            AnalyticsPaymentMethodBreakdownResponse,
         )
-        outliers = normalize_list_response(
-            self.client.get_outliers(
-                period=period,
-                limit=10,
-                transaction_id=transaction_id,
+        outliers = cast(
+            list[BudgetTransactionResponse],
+            normalize_list_response(
+                self.client.get_outliers_for_time_scope(
+                    time_scope=resolved_time_scope,
+                    limit=10,
+                    transaction_id=transaction_id,
+                ),
+                BudgetTransactionResponse,
             ),
-            BudgetTransactionResponse,
         )
 
         total_amount = overview.total_amount
@@ -99,7 +117,7 @@ class InsightService:
         flags = self._build_summary_flags(top_categories, top_accounts, outliers)
 
         return InsightPeriodSummaryResponse(
-            period=period,
+            period=scope_label,
             overview=overview,
             top_categories=top_categories,
             top_accounts=top_accounts,
@@ -110,25 +128,32 @@ class InsightService:
 
     def behavior_summary(
         self,
-        period: str,
+        period: Optional[str] = None,
+        *,
+        time_scope: Optional[RagTimeScope] = None,
         payment_method: Optional[str] = None,
         account: Optional[str] = None,
         transaction_id: Optional[str] = None,
     ) -> InsightBehaviorSummaryResponse:
+        resolved_time_scope = self._resolve_time_scope(period=period, time_scope=time_scope)
         summary = self.period_summary(
             period=period,
+            time_scope=resolved_time_scope,
             payment_method=payment_method,
             account=account,
             transaction_id=transaction_id,
         )
-        daily_totals = normalize_list_response(
-            self.client.get_daily_totals(
-                period=period,
-                payment_method=payment_method,
-                account=account,
-                transaction_id=transaction_id,
+        daily_totals = cast(
+            list[AnalyticsDailyTotalResponse],
+            normalize_list_response(
+                self.client.get_daily_totals_for_time_scope(
+                    time_scope=resolved_time_scope,
+                    payment_method=payment_method,
+                    account=account,
+                    transaction_id=transaction_id,
+                ),
+                AnalyticsDailyTotalResponse,
             ),
-            AnalyticsDailyTotalResponse,
         )
         behavior_summary = self._build_behavior_lines(summary, daily_totals)
         behavior_metrics = list(summary.metrics)
@@ -145,7 +170,7 @@ class InsightService:
             )
 
         return InsightBehaviorSummaryResponse(
-            period=period,
+            period=self._time_scope_label(resolved_time_scope),
             behavior_summary=behavior_summary,
             metrics=behavior_metrics,
             flags=summary.flags,
@@ -153,25 +178,32 @@ class InsightService:
 
     def averages(
         self,
-        period: str,
+        period: Optional[str] = None,
+        *,
+        time_scope: Optional[RagTimeScope] = None,
         payment_method: Optional[str] = None,
         account: Optional[str] = None,
         transaction_id: Optional[str] = None,
     ) -> InsightAveragesResponse:
+        resolved_time_scope = self._resolve_time_scope(period=period, time_scope=time_scope)
         overview = self.analytics.period_overview(
             period=period,
+            time_scope=resolved_time_scope,
             payment_method=payment_method,
             account=account,
             transaction_id=transaction_id,
         )
-        daily_totals = normalize_list_response(
-            self.client.get_daily_totals(
-                period=period,
-                payment_method=payment_method,
-                account=account,
-                transaction_id=transaction_id,
+        daily_totals = cast(
+            list[AnalyticsDailyTotalResponse],
+            normalize_list_response(
+                self.client.get_daily_totals_for_time_scope(
+                    time_scope=resolved_time_scope,
+                    payment_method=payment_method,
+                    account=account,
+                    transaction_id=transaction_id,
+                ),
+                AnalyticsDailyTotalResponse,
             ),
-            AnalyticsDailyTotalResponse,
         )
         active_days = len(daily_totals)
         average_transaction_amount = _safe_average(
@@ -204,7 +236,7 @@ class InsightService:
             ),
         ]
         return InsightAveragesResponse(
-            period=period,
+            period=self._time_scope_label(resolved_time_scope),
             activeDays=active_days,
             totalSpend=overview.total_amount,
             transactionCount=overview.transaction_count,
@@ -423,6 +455,24 @@ class InsightService:
         if current_index == 0:
             return None
         return ordered_periods[current_index - 1]
+
+    @staticmethod
+    def _resolve_time_scope(period: Optional[str], time_scope: Optional[RagTimeScope]) -> RagTimeScope:
+        if time_scope is not None:
+            return time_scope
+        if period:
+            return RagTimeScope(scope_type="statement_period", statement_period=period)
+        raise ValueError("Insight calculations require either a statement period or a date range time_scope")
+
+    @staticmethod
+    def _time_scope_label(time_scope: RagTimeScope) -> str:
+        if time_scope.scope_type == "statement_period" and time_scope.statement_period:
+            return time_scope.statement_period
+        if time_scope.scope_type == "statement_period_range" and time_scope.start_period and time_scope.end_period:
+            return f"{time_scope.start_period} through {time_scope.end_period}"
+        if time_scope.scope_type == "date_range" and time_scope.start_date and time_scope.end_date:
+            return f"{time_scope.start_date.isoformat()} through {time_scope.end_date.isoformat()}"
+        return time_scope.scope_type
 
     @staticmethod
     def _to_category_summary(
