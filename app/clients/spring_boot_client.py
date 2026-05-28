@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal
 import logging
 from time import perf_counter
 from typing import Any, Optional, Union, cast
@@ -20,8 +20,6 @@ class SpringBootClient:
     """Thin HTTP client for Spring Boot-owned transaction and analytics endpoints."""
 
     analytics_base_path = "/api/analytics"
-    _JOINT_ACCOUNT = "joint"
-    _HALF_SHARE = Decimal("0.5")
 
     def __init__(self) -> None:
         settings = get_settings()
@@ -76,18 +74,6 @@ class SpringBootClient:
         account: Optional[str] = None,
         transaction_id: Optional[str] = None,
     ) -> Union[list[dict[str, Any]], dict[str, Any]]:
-        if self._should_blend_joint_account(account):
-            personal_payload = self._get_collection(
-                f"/periods/{period}/categories",
-                params={"paymentMethod": payment_method, "account": account},
-                transaction_id=transaction_id,
-            )
-            joint_payload = self._get_collection(
-                f"/periods/{period}/categories",
-                params={"paymentMethod": payment_method, "account": self._JOINT_ACCOUNT},
-                transaction_id=transaction_id,
-            )
-            return self._blend_collection_payloads(personal_payload, joint_payload, key_field="category")
         return self._get_collection(
             f"/periods/{period}/categories",
             params={"paymentMethod": payment_method, "account": account},
@@ -102,28 +88,6 @@ class SpringBootClient:
         account: Optional[str] = None,
         transaction_id: Optional[str] = None,
     ) -> Union[list[dict[str, Any]], dict[str, Any]]:
-        if self._should_blend_joint_account(account):
-            personal_payload = self._get_collection(
-                "/range/categories",
-                params={
-                    "startDate": start_date.isoformat(),
-                    "endDate": end_date.isoformat(),
-                    "paymentMethod": payment_method,
-                    "account": account,
-                },
-                transaction_id=transaction_id,
-            )
-            joint_payload = self._get_collection(
-                "/range/categories",
-                params={
-                    "startDate": start_date.isoformat(),
-                    "endDate": end_date.isoformat(),
-                    "paymentMethod": payment_method,
-                    "account": self._JOINT_ACCOUNT,
-                },
-                transaction_id=transaction_id,
-            )
-            return self._blend_collection_payloads(personal_payload, joint_payload, key_field="category")
         return self._get_collection(
             "/range/categories",
             params={
@@ -143,16 +107,6 @@ class SpringBootClient:
         account: Optional[str] = None,
         transaction_id: Optional[str] = None,
     ) -> Union[list[dict[str, Any]], dict[str, Any]]:
-        if self._should_blend_joint_account(account):
-            blended = self.get_category_breakdown(
-                period=period,
-                payment_method=payment_method,
-                account=account,
-                transaction_id=transaction_id,
-            )
-            if isinstance(blended, dict):
-                return blended
-            return self._sort_collection_by_amount(blended)[:limit]
         return self._get_collection(
             f"/periods/{period}/categories/top",
             params={"limit": str(limit), "paymentMethod": payment_method, "account": account},
@@ -168,17 +122,6 @@ class SpringBootClient:
         account: Optional[str] = None,
         transaction_id: Optional[str] = None,
     ) -> Union[list[dict[str, Any]], dict[str, Any]]:
-        if self._should_blend_joint_account(account):
-            blended = self.get_range_category_breakdown(
-                start_date=start_date,
-                end_date=end_date,
-                payment_method=payment_method,
-                account=account,
-                transaction_id=transaction_id,
-            )
-            if isinstance(blended, dict):
-                return blended
-            return self._sort_collection_by_amount(blended)[:limit]
         return self._get_collection(
             "/range/categories/top",
             params={
@@ -226,18 +169,6 @@ class SpringBootClient:
         account: Optional[str] = None,
         transaction_id: Optional[str] = None,
     ) -> Union[list[dict[str, Any]], dict[str, Any]]:
-        if self._should_blend_joint_account(account):
-            personal_payload = self._get_collection(
-                f"/periods/{period}/payment-methods",
-                params={"account": account},
-                transaction_id=transaction_id,
-            )
-            joint_payload = self._get_collection(
-                f"/periods/{period}/payment-methods",
-                params={"account": self._JOINT_ACCOUNT},
-                transaction_id=transaction_id,
-            )
-            return self._blend_collection_payloads(personal_payload, joint_payload, key_field="paymentMethod")
         return self._get_collection(
             f"/periods/{period}/payment-methods",
             params={"account": account},
@@ -251,26 +182,6 @@ class SpringBootClient:
         account: Optional[str] = None,
         transaction_id: Optional[str] = None,
     ) -> Union[list[dict[str, Any]], dict[str, Any]]:
-        if self._should_blend_joint_account(account):
-            personal_payload = self._get_collection(
-                "/range/payment-methods",
-                params={
-                    "startDate": start_date.isoformat(),
-                    "endDate": end_date.isoformat(),
-                    "account": account,
-                },
-                transaction_id=transaction_id,
-            )
-            joint_payload = self._get_collection(
-                "/range/payment-methods",
-                params={
-                    "startDate": start_date.isoformat(),
-                    "endDate": end_date.isoformat(),
-                    "account": self._JOINT_ACCOUNT,
-                },
-                transaction_id=transaction_id,
-            )
-            return self._blend_collection_payloads(personal_payload, joint_payload, key_field="paymentMethod")
         return self._get_collection(
             "/range/payment-methods",
             params={
@@ -288,18 +199,6 @@ class SpringBootClient:
         account: Optional[str] = None,
         transaction_id: Optional[str] = None,
     ) -> Union[list[dict[str, Any]], dict[str, Any]]:
-        if self._should_blend_joint_account(account):
-            personal_payload = self._get_collection(
-                f"/periods/{period}/daily",
-                params={"paymentMethod": payment_method, "account": account},
-                transaction_id=transaction_id,
-            )
-            joint_payload = self._get_collection(
-                f"/periods/{period}/daily",
-                params={"paymentMethod": payment_method, "account": self._JOINT_ACCOUNT},
-                transaction_id=transaction_id,
-            )
-            return self._blend_collection_payloads(personal_payload, joint_payload, key_field="date")
         return self._get_collection(
             f"/periods/{period}/daily",
             params={"paymentMethod": payment_method, "account": account},
@@ -314,28 +213,6 @@ class SpringBootClient:
         account: Optional[str] = None,
         transaction_id: Optional[str] = None,
     ) -> Union[list[dict[str, Any]], dict[str, Any]]:
-        if self._should_blend_joint_account(account):
-            personal_payload = self._get_collection(
-                "/range/daily",
-                params={
-                    "startDate": start_date.isoformat(),
-                    "endDate": end_date.isoformat(),
-                    "paymentMethod": payment_method,
-                    "account": account,
-                },
-                transaction_id=transaction_id,
-            )
-            joint_payload = self._get_collection(
-                "/range/daily",
-                params={
-                    "startDate": start_date.isoformat(),
-                    "endDate": end_date.isoformat(),
-                    "paymentMethod": payment_method,
-                    "account": self._JOINT_ACCOUNT,
-                },
-                transaction_id=transaction_id,
-            )
-            return self._blend_collection_payloads(personal_payload, joint_payload, key_field="date")
         return self._get_collection(
             "/range/daily",
             params={
@@ -354,18 +231,6 @@ class SpringBootClient:
         account: Optional[str] = None,
         transaction_id: Optional[str] = None,
     ) -> Union[list[dict[str, Any]], dict[str, Any]]:
-        if self._should_blend_joint_account(account):
-            personal_payload = self._get_collection(
-                f"/periods/{period}/criticality",
-                params={"paymentMethod": payment_method, "account": account},
-                transaction_id=transaction_id,
-            )
-            joint_payload = self._get_collection(
-                f"/periods/{period}/criticality",
-                params={"paymentMethod": payment_method, "account": self._JOINT_ACCOUNT},
-                transaction_id=transaction_id,
-            )
-            return self._blend_collection_payloads(personal_payload, joint_payload, key_field="criticality")
         return self._get_collection(
             f"/periods/{period}/criticality",
             params={"paymentMethod": payment_method, "account": account},
@@ -380,28 +245,6 @@ class SpringBootClient:
         account: Optional[str] = None,
         transaction_id: Optional[str] = None,
     ) -> Union[list[dict[str, Any]], dict[str, Any]]:
-        if self._should_blend_joint_account(account):
-            personal_payload = self._get_collection(
-                "/range/criticality",
-                params={
-                    "startDate": start_date.isoformat(),
-                    "endDate": end_date.isoformat(),
-                    "paymentMethod": payment_method,
-                    "account": account,
-                },
-                transaction_id=transaction_id,
-            )
-            joint_payload = self._get_collection(
-                "/range/criticality",
-                params={
-                    "startDate": start_date.isoformat(),
-                    "endDate": end_date.isoformat(),
-                    "paymentMethod": payment_method,
-                    "account": self._JOINT_ACCOUNT,
-                },
-                transaction_id=transaction_id,
-            )
-            return self._blend_collection_payloads(personal_payload, joint_payload, key_field="criticality")
         return self._get_collection(
             "/range/criticality",
             params={
@@ -869,68 +712,10 @@ class SpringBootClient:
             headers["X-Request-ID"] = resolved_request_id
         return headers
 
-    @classmethod
-    def _should_blend_joint_account(cls, account: Optional[str]) -> bool:
-        normalized_account = cls._normalize_account(account)
-        return normalized_account is not None and normalized_account != cls._JOINT_ACCOUNT
-
-    @staticmethod
-    def _normalize_account(account: Optional[str]) -> Optional[str]:
-        if not isinstance(account, str):
-            return None
-        normalized_account = account.strip().lower()
-        return normalized_account or None
-
     @staticmethod
     def _to_decimal(value: Any) -> Decimal:
         return Decimal(str(value))
 
-    @staticmethod
-    def _weighted_transaction_count(value: Any, *, weight: Decimal) -> int:
-        return int((Decimal(str(value)) * weight).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
-
-
-    @classmethod
-    def _blend_collection_payloads(
-        cls,
-        personal_payload: Union[list[dict[str, Any]], dict[str, Any]],
-        joint_payload: Union[list[dict[str, Any]], dict[str, Any]],
-        *,
-        key_field: str,
-    ) -> Union[list[dict[str, Any]], dict[str, Any]]:
-        if isinstance(personal_payload, dict) or isinstance(joint_payload, dict):
-            return personal_payload if isinstance(personal_payload, dict) else joint_payload
-
-        merged: dict[str, dict[str, Any]] = {}
-
-        for row in personal_payload:
-            key = str(row.get(key_field))
-            merged[key] = {
-                **row,
-                "totalAmount": cls._to_decimal(row.get("totalAmount", 0)),
-                "transactionCount": cls._weighted_transaction_count(row.get("transactionCount", 0), weight=Decimal("1")),
-            }
-
-        for row in joint_payload:
-            key = str(row.get(key_field))
-            if key not in merged:
-                merged[key] = {
-                    **row,
-                    "totalAmount": Decimal("0"),
-                    "transactionCount": 0,
-                }
-            merged[key]["totalAmount"] = cls._to_decimal(merged[key].get("totalAmount", 0)) + (
-                cls._to_decimal(row.get("totalAmount", 0)) * cls._HALF_SHARE
-            )
-            merged[key]["transactionCount"] = int(merged[key].get("transactionCount", 0)) + cls._weighted_transaction_count(
-                row.get("transactionCount", 0),
-                weight=cls._HALF_SHARE,
-            )
-
-        rows = list(merged.values())
-        if key_field == "date":
-            return sorted(rows, key=lambda row: str(row.get("date") or ""))
-        return cls._sort_collection_by_amount(rows)
 
     @classmethod
     def _sort_collection_by_amount(cls, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

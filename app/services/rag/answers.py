@@ -439,10 +439,7 @@ class RAGAnswerMixin:
             )
 
         normalized_account = str(account).strip().lower()
-        if normalized_account == "joint":
-            return total_for_account("joint")
-
-        return total_for_account(normalized_account) + (total_for_account("joint") / Decimal("2"))
+        return total_for_account(normalized_account)
 
     def _question_category_names(
         self,

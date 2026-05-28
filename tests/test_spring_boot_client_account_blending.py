@@ -19,31 +19,26 @@ class SpringBootClientAccountBlendingTests(unittest.TestCase):
         response.raise_for_status.return_value = None
         return response
 
-    def test_get_category_breakdown_blends_account_with_half_joint(self) -> None:
-        self.client.session.get.side_effect = [
-            self._mock_json_response(
-                [
-                    {"category": "Dining Out", "totalAmount": "60.63", "transactionCount": 6},
-                    {"category": "Groceries", "totalAmount": "15.25", "transactionCount": 1},
-                ]
-            ),
-            self._mock_json_response(
-                [
-                    {"category": "Dining Out", "totalAmount": "424.07", "transactionCount": 24},
-                    {"category": "Groceries", "totalAmount": "1261.67", "transactionCount": 29},
-                ]
-            ),
-        ]
+    def test_get_category_breakdown_passes_account_filter_through_without_joint_blending(self) -> None:
+        self.client.session.get.return_value = self._mock_json_response(
+            [
+                {"category": "Dining Out", "totalAmount": "60.63", "transactionCount": 6},
+                {"category": "Groceries", "totalAmount": "15.25", "transactionCount": 1},
+            ]
+        )
 
         payload = self.client.get_category_breakdown(period="December2025", account="josh")
 
         assert isinstance(payload, list)
-        self.assertEqual(payload[0]["category"], "Groceries")
-        self.assertEqual(str(payload[0]["totalAmount"]), "646.085")
-        self.assertEqual(payload[0]["transactionCount"], 16)
-        self.assertEqual(payload[1]["category"], "Dining Out")
-        self.assertEqual(str(payload[1]["totalAmount"]), "272.665")
-        self.assertEqual(payload[1]["transactionCount"], 18)
+        self.assertEqual(payload[0]["category"], "Dining Out")
+        self.assertEqual(payload[0]["totalAmount"], "60.63")
+        self.assertEqual(payload[0]["transactionCount"], 6)
+        self.assertEqual(payload[1]["category"], "Groceries")
+        self.assertEqual(payload[1]["totalAmount"], "15.25")
+        self.assertEqual(payload[1]["transactionCount"], 1)
+        self.assertEqual(self.client.session.get.call_count, 1)
+        _, kwargs = self.client.session.get.call_args
+        self.assertEqual(kwargs["params"]["account"], "josh")
 
     def test_get_period_overview_trusts_backend_summary_for_account_filters(self) -> None:
         self.client.session.get.return_value = self._mock_json_response(

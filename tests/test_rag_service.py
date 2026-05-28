@@ -709,7 +709,7 @@ class RAGServiceLatencyOptimizationTests(unittest.TestCase):
         self.assertIn("- 2026-04-01: $100.00 across 4 transactions", answer)
         self.assertNotIn("\\n", answer)
 
-    def test_deterministic_range_category_average_answer_uses_monthly_category_totals(self) -> None:
+    def test_deterministic_range_category_average_answer_uses_direct_account_monthly_totals(self) -> None:
         service = RAGService(Mock(), Mock(), None)
 
         answer = service._deterministic_answer(
@@ -828,10 +828,10 @@ class RAGServiceLatencyOptimizationTests(unittest.TestCase):
 
         assert answer is not None
         self.assertIn("Average monthly spend from December2025 through May2026 (6 months):", answer)
-        self.assertIn("- Dining Out: $218.72/month average ($1312.32 total across 6 months).", answer)
-        self.assertIn("- Groceries: $376.08/month average ($2256.46 total across 6 months).", answer)
+        self.assertIn("- Dining Out: $32.23/month average ($193.36 total across 6 months).", answer)
+        self.assertIn("- Groceries: $3.04/month average ($18.25 total across 6 months).", answer)
         self.assertIn("## Monthly category totals", answer)
-        self.assertIn("- December2025: Dining Out $272.66, Groceries $630.84", answer)
+        self.assertIn("- December2025: Dining Out $60.63, Groceries $0.00", answer)
 
 
 class RAGServiceLangGraphReasoningTests(unittest.TestCase):
