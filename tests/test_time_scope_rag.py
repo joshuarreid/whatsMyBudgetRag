@@ -10,7 +10,9 @@ from app.models.schemas import RagIntentResponse, RagTimeScope
 from app.services.analytics_service import AnalyticsService
 from app.services.insight_service import InsightService
 from app.services.rag_service import RAGService
+from app.skills.analytics import TopCategoriesSkill
 from app.skills.factories import build_skill_registry
+from app.skills.registry import SkillRegistry
 
 
 class RAGServiceDateRangeExecutionTests(unittest.TestCase):
@@ -128,6 +130,54 @@ class RagTimeScopeValidationTests(unittest.TestCase):
                     "unexpected": True,
                 }
             )
+
+
+class RAGServiceWeeklyTopCategoriesTests(unittest.TestCase):
+    def test_weekly_top_categories_question_expands_month_and_returns_week_by_week_answer(self) -> None:
+        spring = Mock()
+        registry = SkillRegistry([TopCategoriesSkill(spring)])
+        service = RAGService(spring, registry, None)
+
+        weekly_payloads = {
+            (date(2026, 3, 1), date(2026, 3, 7)): [
+                {"category": "Reimbursement", "totalAmount": "900.00", "transactionCount": 1},
+                {"category": "Gifts", "totalAmount": "200.00", "transactionCount": 2},
+            ],
+            (date(2026, 3, 8), date(2026, 3, 14)): [
+                {"category": "Healthcare", "totalAmount": "300.00", "transactionCount": 3},
+                {"category": "Gas", "totalAmount": "150.00", "transactionCount": 4},
+            ],
+            (date(2026, 3, 15), date(2026, 3, 21)): [
+                {"category": "Miata", "totalAmount": "180.00", "transactionCount": 1},
+            ],
+            (date(2026, 3, 22), date(2026, 3, 28)): [
+                {"category": "Gifts", "totalAmount": "250.00", "transactionCount": 2},
+            ],
+            (date(2026, 3, 29), date(2026, 3, 31)): [
+                {"category": "Gas", "totalAmount": "60.00", "transactionCount": 2},
+            ],
+        }
+
+        def top_categories_for_scope(*, time_scope, limit=10, payment_method=None, account=None, transaction_id=None):
+            self.assertEqual(time_scope.scope_type, "date_range")
+            return weekly_payloads[(time_scope.start_date, time_scope.end_date)]
+
+        spring.get_top_categories_for_time_scope.side_effect = top_categories_for_scope
+
+        response = service.answer(
+            question="What were my highest spending categories per week?",
+            time_scope=RagTimeScope(scope_type="statement_period", statement_period="March2026"),
+        )
+
+        self.assertEqual(response.period, "March2026")
+        self.assertEqual(response.time_scope.scope_type, "statement_period")
+        self.assertEqual(response.context["execution_plan"]["strategy"], "multi_scope")
+        self.assertEqual(len(response.context["execution_plan"]["steps"]), 5)
+        self.assertEqual(response.plan, ["top_categories", "top_categories", "top_categories", "top_categories", "top_categories"])
+        self.assertIn("Here are the highest spending categories per week for March2026:", response.answer)
+        self.assertIn("Week 1 (2026-03-01 to 2026-03-07): Reimbursement at $900.00 across 1 transactions.", response.answer)
+        self.assertIn("Week 5 (2026-03-29 to 2026-03-31): Gas at $60.00 across 2 transactions.", response.answer)
+        self.assertEqual(spring.get_top_categories_for_time_scope.call_count, 5)
 
 
 if __name__ == "__main__":

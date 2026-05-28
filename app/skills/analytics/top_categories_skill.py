@@ -15,6 +15,8 @@ class TopCategoriesSkill(Skill):
         keywords=(
             "top category",
             "top categories",
+            "highest spending category",
+            "highest spending categories",
             "largest category",
             "largest spending category",
             "biggest category",

@@ -23,6 +23,7 @@ SAMPLE_QUESTION_EXPECTATIONS = {
     "What’s the gist of this month": {"overview"},
     "What’s my spending this month": {"overview"},
     "what was my largest spending category in february": {"categories", "top_categories"},
+    "what were my highest spending categories per week in march": {"categories", "top_categories"},
     "How much did I spend in January and what were the categories": {"overview", "categories"},
     "In March what was my biggest transaction": {"outliers"},
     "What were the biggest transactions of the month?": {"outliers"},

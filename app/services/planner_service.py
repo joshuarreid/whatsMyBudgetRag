@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from calendar import monthrange
 from dataclasses import dataclass
 from datetime import date
 import re
@@ -20,6 +21,10 @@ COMPARISON_AND_PAIR_PATTERN = re.compile(
     rf"\bcompare\b.*?\b(?P<left>{STATEMENT_PERIOD_MONTH_PATTERN})(?:\s+(?P<left_year>\d{{4}}))?\s+"
     rf"(?:and|to|with)\s+"
     rf"(?P<right>{STATEMENT_PERIOD_MONTH_PATTERN})(?:\s+(?P<right_year>\d{{4}}))?\b",
+    re.IGNORECASE,
+)
+WEEKLY_BREAKDOWN_KEYWORD_PATTERN = re.compile(
+    r"\b(?:weekly|per\s+week|by\s+week|each\s+week|week\s*[- ]\s*by\s*[- ]\s*week)\b",
     re.IGNORECASE,
 )
 MAX_MULTI_PERIOD_STEPS = 24
@@ -131,6 +136,9 @@ class PlannerService:
         if time_scope.scope_type == "statement_period_range" and self._requires_period_expansion(question):
             return self._expand_statement_period_range(time_scope)[:MAX_MULTI_PERIOD_STEPS]
 
+        if time_scope.scope_type == "statement_period" and self._requires_weekly_expansion(question):
+            return self._expand_statement_period_weeks(time_scope)[:MAX_MULTI_PERIOD_STEPS]
+
         return [
             _PlannedScope(
                 label=self._scope_label(time_scope),
@@ -181,6 +189,10 @@ class PlannerService:
             )
         )
 
+    @staticmethod
+    def _requires_weekly_expansion(question: str) -> bool:
+        return bool(WEEKLY_BREAKDOWN_KEYWORD_PATTERN.search(question))
+
     def _expand_statement_period_range(self, time_scope: RagTimeScope) -> list[_PlannedScope]:
         if time_scope.scope_type != "statement_period_range":
             return []
@@ -201,6 +213,35 @@ class PlannerService:
                 )
             )
             current = self.intent_service.shift_month(current, offset=1)
+        return scopes
+
+    @staticmethod
+    def _expand_statement_period_weeks(time_scope: RagTimeScope) -> list[_PlannedScope]:
+        if time_scope.scope_type != "statement_period" or not time_scope.statement_period:
+            return []
+
+        month_reference = RagTimeScope.parse_statement_period(time_scope.statement_period)
+        last_day = monthrange(month_reference.year, month_reference.month)[1]
+
+        scopes: list[_PlannedScope] = []
+        week_number = 1
+        start_day = 1
+        while start_day <= last_day and len(scopes) < MAX_MULTI_PERIOD_STEPS:
+            end_day = min(start_day + 6, last_day)
+            start_date = date(month_reference.year, month_reference.month, start_day)
+            end_date = date(month_reference.year, month_reference.month, end_day)
+            scopes.append(
+                _PlannedScope(
+                    label=f"Week {week_number} ({start_date.isoformat()} to {end_date.isoformat()})",
+                    time_scope=RagTimeScope(
+                        scope_type="date_range",
+                        start_date=start_date,
+                        end_date=end_date,
+                    ),
+                )
+            )
+            week_number += 1
+            start_day += 7
         return scopes
 
     @staticmethod

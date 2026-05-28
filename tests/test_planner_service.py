@@ -112,6 +112,30 @@ class PlannerServiceTests(unittest.TestCase):
         self.assertEqual(plan.steps[0].output_key, "daily_totals")
         self.assertEqual(plan.steps[0].period, "April2026")
 
+    def test_build_plan_expands_statement_period_into_weeks_for_weekly_breakdown_questions(self) -> None:
+        weekly_categories_skill = StubSkill(skill_id="top_categories", context_key="top_categories")
+
+        plan = self.planner.build_plan(
+            question="What were my highest spending categories per week?",
+            skills=[weekly_categories_skill],
+            time_scope=RagTimeScope(scope_type="statement_period", statement_period="March2026"),
+            period="March2026",
+            payment_method=None,
+            account=None,
+            today=date(2026, 5, 27),
+        )
+
+        self.assertEqual(plan.strategy, "multi_scope")
+        self.assertEqual(len(plan.steps), 5)
+        self.assertEqual([step.skill_id for step in plan.steps], ["top_categories"] * 5)
+        self.assertTrue(all(step.time_scope is not None and step.time_scope.scope_type == "date_range" for step in plan.steps))
+        self.assertEqual(plan.steps[0].label, "Week 1 (2026-03-01 to 2026-03-07)")
+        self.assertEqual(plan.steps[0].time_scope.start_date, date(2026, 3, 1))
+        self.assertEqual(plan.steps[0].time_scope.end_date, date(2026, 3, 7))
+        self.assertEqual(plan.steps[-1].label, "Week 5 (2026-03-29 to 2026-03-31)")
+        self.assertEqual(plan.steps[-1].time_scope.start_date, date(2026, 3, 29))
+        self.assertEqual(plan.steps[-1].time_scope.end_date, date(2026, 3, 31))
+
 
 if __name__ == "__main__":
     unittest.main()
