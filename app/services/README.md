@@ -300,9 +300,26 @@ The graph adds two benefits:
 
 That is hard to express cleanly with only one-off keyword checks.
 
----
+### 8. Monthly range-average questions
 
-## How Pydantic and LangGraph work together
+`PlannerService` also contains a targeted expansion rule for statement-period range questions that ask for an average per month.
+
+Example:
+
+- “From December to May on average how much do I spend a month on Dining Out and Groceries?”
+
+For this shape of question, the execution plan expands the range into one statement-period step per month so the app can fetch monthly category data instead of trying to answer from a single coarse range total.
+
+A corresponding deterministic answer path in `app/services/rag/answers.py` then:
+
+- identifies the requested categories from the question and available structured results
+- computes monthly totals across the expanded periods
+- returns average-per-month and total-across-range values
+- uses statement-period summary breakdowns when needed to reconstruct personal-account semantics such as personal spend + 50% of joint
+ 
+ ---
+ 
+ ## How Pydantic and LangGraph work together
 
 These two pieces serve different roles:
 
@@ -419,4 +436,3 @@ If you are new to this codebase, start with these files in order:
 4. `app/services/intent_service.py`
 5. `app/services/langgraph_reasoning_service.py`
 6. `app/services/planner_service.py`
-

@@ -130,6 +130,57 @@ class IntentServiceInferenceTests(unittest.TestCase):
             },
         )
 
+    def test_infer_time_scope_resolves_explicit_current_year_to_year_to_date_statement_period_range(self) -> None:
+        inferred_scope = self.service.infer_time_scope(
+            question="How much do I spend a month on average in 2026 on nonessential items?",
+            today=date(2026, 5, 28),
+        )
+
+        self.assertIsNotNone(inferred_scope)
+        self.assertEqual(inferred_scope["source"], "question_calendar_year")
+        self.assertEqual(
+            inferred_scope["time_scope"],
+            {
+                "scope_type": "statement_period_range",
+                "start_period": "January2026",
+                "end_period": "May2026",
+            },
+        )
+
+    def test_infer_time_scope_resolves_this_year_to_year_to_date_statement_period_range(self) -> None:
+        inferred_scope = self.service.infer_time_scope(
+            question="How much have I spent this year?",
+            today=date(2026, 5, 28),
+        )
+
+        self.assertIsNotNone(inferred_scope)
+        self.assertEqual(inferred_scope["source"], "question_calendar_year")
+        self.assertEqual(
+            inferred_scope["time_scope"],
+            {
+                "scope_type": "statement_period_range",
+                "start_period": "January2026",
+                "end_period": "May2026",
+            },
+        )
+
+    def test_infer_time_scope_resolves_prior_year_to_full_calendar_year_statement_period_range(self) -> None:
+        inferred_scope = self.service.infer_time_scope(
+            question="How much did I spend in 2025?",
+            today=date(2026, 5, 28),
+        )
+
+        self.assertIsNotNone(inferred_scope)
+        self.assertEqual(inferred_scope["source"], "question_calendar_year")
+        self.assertEqual(
+            inferred_scope["time_scope"],
+            {
+                "scope_type": "statement_period_range",
+                "start_period": "January2025",
+                "end_period": "December2025",
+            },
+        )
+
     def test_infer_time_scope_resolves_end_of_month_to_date_range(self) -> None:
         inferred_scope = self.service.infer_time_scope(
             question="How much did I spend at the end of April?",

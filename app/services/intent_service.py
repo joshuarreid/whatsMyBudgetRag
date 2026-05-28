@@ -55,6 +55,9 @@ MONTH_OF_PATTERN = re.compile(
     re.IGNORECASE,
 )
 SIMPLE_MONTH_PATTERN = re.compile(rf"^(?P<month>{STATEMENT_PERIOD_MONTH_PATTERN})$", re.IGNORECASE)
+YEAR_REFERENCE_PATTERN = re.compile(r"\b(?P<year>20\d{2})\b")
+CURRENT_YEAR_PATTERN = re.compile(r"\b(?:this|current)\s+year\b", re.IGNORECASE)
+LAST_YEAR_PATTERN = re.compile(r"\b(?:last|previous)\s+year\b", re.IGNORECASE)
 MONTH_RANGE_PATTERN = re.compile(
     rf"\b(?P<start_month>{STATEMENT_PERIOD_MONTH_PATTERN})(?:\s+(?P<start_year>\d{{4}}))?\s+"
     rf"(?:through|thru|to|until)\s+"
@@ -416,6 +419,61 @@ class IntentService:
                 ),
             )
 
+        current_year_match = CURRENT_YEAR_PATTERN.search(text)
+        if current_year_match:
+            start_period, end_period = self.resolve_calendar_year_range(year=today.year, today=today)
+            return self._build_time_scope_resolution(
+                source=f"{source_prefix}_calendar_year",
+                matched_text=matched_text or current_year_match.group(0),
+                time_scope=RagTimeScope(
+                    scope_type="statement_period_range",
+                    start_period=start_period,
+                    end_period=end_period,
+                ),
+                resolution_rule=self._resolution_rule(
+                    source_prefix,
+                    "current year references resolve to a year-to-date inclusive statement period range through the current statement period",
+                ),
+            )
+
+        last_year_match = LAST_YEAR_PATTERN.search(text)
+        if last_year_match:
+            target_year = today.year - 1
+            start_period, end_period = self.resolve_calendar_year_range(year=target_year, today=today)
+            return self._build_time_scope_resolution(
+                source=f"{source_prefix}_calendar_year",
+                matched_text=matched_text or last_year_match.group(0),
+                time_scope=RagTimeScope(
+                    scope_type="statement_period_range",
+                    start_period=start_period,
+                    end_period=end_period,
+                ),
+                resolution_rule=self._resolution_rule(
+                    source_prefix,
+                    "last year references resolve to the full prior calendar year's inclusive statement period range",
+                ),
+            )
+
+        year_match = YEAR_REFERENCE_PATTERN.search(text)
+        if year_match:
+            target_year = int(year_match.group("year"))
+            start_period, end_period = self.resolve_calendar_year_range(year=target_year, today=today)
+            year_resolution_rule = (
+                "explicit calendar year references resolve to a year-to-date inclusive statement period range through the current statement period"
+                if target_year == today.year
+                else "explicit calendar year references resolve to the full calendar year's inclusive statement period range"
+            )
+            return self._build_time_scope_resolution(
+                source=f"{source_prefix}_calendar_year",
+                matched_text=matched_text or year_match.group(0),
+                time_scope=RagTimeScope(
+                    scope_type="statement_period_range",
+                    start_period=start_period,
+                    end_period=end_period,
+                ),
+                resolution_rule=self._resolution_rule(source_prefix, year_resolution_rule),
+            )
+
         for pattern, offset_days, resolution_rule in DAY_REFERENCE_PATTERNS:
             day_match = pattern.search(text)
             if day_match is None:
@@ -641,6 +699,15 @@ class IntentService:
             start_year = end_reference.year
         start_period_reference = date(start_year, start_reference.month, 1)
         end_period_reference = date(end_reference.year, end_reference.month, 1)
+        return (
+            self.format_statement_period(start_period_reference),
+            self.format_statement_period(end_period_reference),
+        )
+
+    def resolve_calendar_year_range(self, *, year: int, today: date) -> tuple[str, str]:
+        end_month = today.month if year == today.year else 12
+        start_period_reference = date(year, 1, 1)
+        end_period_reference = date(year, end_month, 1)
         return (
             self.format_statement_period(start_period_reference),
             self.format_statement_period(end_period_reference),

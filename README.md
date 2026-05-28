@@ -117,6 +117,41 @@ The response context will include `routing.reasoning_graph` metadata so you can 
 
 Outbound Spring Boot requests now automatically include `X-Transaction-ID` and `X-Request-ID`. If an inbound request provides `X-Transaction-ID`, that value is reused; otherwise the app falls back to the current request ID.
 
+## Analytics Filter Semantics
+
+### Account filter behavior
+
+Within this FastAPI orchestration layer, personal account filters use the budgeting rule:
+
+- `account=josh` = Josh personal spend + 50% of joint spend
+- `account=anna` = Anna personal spend + 50% of joint spend
+- `account=joint` = joint spend only
+- no `account` filter = all accounts combined
+
+This blending is applied for collection-style analytics responses so category-style answers line up with the budgeting model users expect.
+
+Collection-style endpoints currently blended for personal account filters:
+
+- `categories`
+- `categories/top`
+- `payment-methods`
+- `daily`
+- `criticality`
+
+The same rule applies to both statement-period and date-range variants of those endpoints.
+
+### Overview / summary exception
+
+Do **not** apply the half-joint blend twice.
+
+Summary-style totals such as `overview` / spending-summary responses are already returned by Spring Boot with the personal-account share of joint spend included. FastAPI therefore treats those endpoints as already blended and passes them through as-is.
+
+### Statement-period range monthly averages
+
+For questions such as “From December to May on average how much do I spend a month on Dining Out and Groceries?”, the planner expands the statement-period range into one step per month so the app can fetch monthly category totals and average them.
+
+The answer layer also keeps the native `statement_period_summary_range` payload in context so it can derive account-aware monthly category totals from summary breakdowns when needed.
+
 ## Local Development
 
 ```bash
