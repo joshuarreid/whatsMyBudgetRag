@@ -12,7 +12,14 @@ class TopCategoriesSkill(Skill):
         category="analytics",
         context_key="top_categories",
         description="Load the top spending categories for the selected statement period.",
-        keywords=("top category", "top categories"),
+        keywords=(
+            "top category",
+            "top categories",
+            "largest category",
+            "largest spending category",
+            "biggest category",
+            "biggest spending category",
+        ),
     )
 
     def __init__(self, spring_client: SpringBootClient) -> None:

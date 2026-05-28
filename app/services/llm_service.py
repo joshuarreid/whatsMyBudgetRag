@@ -36,7 +36,7 @@ class LLMService:
             "Use timeline_context and period_interpretation to resolve references like this month, current month, this period, last month, previous month, or a bare month name such as October. "
             "Use the provided skill outputs and any unavailable_tools notes when deciding what evidence was available. "
             "If the data is insufficient, say so clearly.\n\n"
-            "Your response should be in Markdown Language"
+            "Your response should be readable for a mobile chat window"
             f"Question:\n{question}\n\n"
             f"Context:\n{json.dumps(context, default=str, indent=2)}"
         )

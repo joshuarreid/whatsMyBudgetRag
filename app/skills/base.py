@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+import re
 from typing import Any, Optional
 
 from app.models.schemas import RagTimeScope
@@ -72,8 +73,23 @@ class Skill(ABC):
         return self.definition.expand_with_multi_scope
 
     def matches(self, question: str) -> bool:
-        lowered = question.lower()
-        return any(keyword in lowered for keyword in self.definition.keywords)
+        normalized_question = self._normalize_match_text(question)
+        compact_question = normalized_question.replace(" ", "")
+        return any(
+            normalized_keyword in normalized_question
+            or normalized_keyword.replace(" ", "") in compact_question
+            for normalized_keyword in (
+                self._normalize_match_text(keyword)
+                for keyword in self.definition.keywords
+            )
+            if normalized_keyword
+        )
+
+    @staticmethod
+    def _normalize_match_text(value: str) -> str:
+        normalized = value.lower().replace("’", "'")
+        normalized = re.sub(r"[^a-z0-9]+", " ", normalized)
+        return re.sub(r"\s+", " ", normalized).strip()
 
     @abstractmethod
     def execute(self, request: SkillRequest) -> SkillResult:

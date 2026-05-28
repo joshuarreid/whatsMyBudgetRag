@@ -8,6 +8,7 @@ from unittest.mock import Mock
 
 from app.models.schemas import RagTimeScope
 from app.repositories import ConversationMessageRecord, ConversationRecord
+from app.services.langgraph_reasoning_service import LangGraphReasoningService
 from app.services.rag_service import RAGService
 from app.skills.base import Skill, SkillDefinition, SkillRequest, SkillResult
 from app.skills.registry import SkillRegistry
@@ -666,6 +667,48 @@ class RAGServiceLatencyOptimizationTests(unittest.TestCase):
         self.assertIn("February2026", response.answer)
         self.assertIn("## Daily totals", response.answer)
         self.assertIn("2026-01-20: $2234.38 across 8 transactions", response.answer)
+
+
+class RAGServiceLangGraphReasoningTests(unittest.TestCase):
+    def test_select_skills_can_expand_reasoning_families_with_langgraph(self) -> None:
+        registry = SkillRegistry(
+            [
+                RecordingSkill(skill_id="overview", context_key="overview", keywords=("overview", "summary", "spend")),
+                RecordingSkill(skill_id="statement_period_summary_range", context_key="statement_period_summary_range", keywords=("compare",)),
+                RecordingSkill(skill_id="top_categories", context_key="top_categories", keywords=("category",)),
+                RecordingSkill(skill_id="account_breakdown", context_key="account_breakdown", keywords=("account",)),
+                RecordingSkill(skill_id="payment_methods", context_key="payment_methods", keywords=("payment",)),
+                RecordingSkill(skill_id="month_over_month", context_key="month_over_month", keywords=("month over month",)),
+            ]
+        )
+        langgraph_service = LangGraphReasoningService(enabled=True)
+        if not langgraph_service.enabled:
+            self.skipTest("langgraph dependency is not installed")
+
+        service = RAGService(Mock(), registry, None, langgraph_service=langgraph_service)
+
+        selected_skills, routing_metadata = service._select_skills(
+            "Why did my spending jump in April versus March?",
+            time_scope=RagTimeScope(
+                scope_type="statement_period_range",
+                start_period="March2026",
+                end_period="April2026",
+            ),
+            llm_intent=None,
+        )
+
+        self.assertEqual(routing_metadata["source"], "langgraph_reasoning")
+        selected_skill_ids = [skill.skill_id for skill in selected_skills]
+        self.assertIn("statement_period_summary_range", selected_skill_ids)
+        self.assertIn("overview", selected_skill_ids)
+        self.assertIn("top_categories", selected_skill_ids)
+        self.assertIn("account_breakdown", selected_skill_ids)
+        self.assertIn("payment_methods", selected_skill_ids)
+        self.assertIn("month_over_month", selected_skill_ids)
+        self.assertEqual(
+            routing_metadata["reasoning_graph"]["selected_families"],
+            ["baseline_summary", "driver_analysis", "derived_narrative"],
+        )
 
 
 class RAGServiceConversationHistoryTests(unittest.TestCase):

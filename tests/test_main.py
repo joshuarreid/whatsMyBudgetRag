@@ -15,6 +15,7 @@ class MainAppCorsTests(unittest.TestCase):
             request_timeout_seconds=10,
             log_level="INFO",
             log_format="text",
+            langgraph_enabled=False,
             cors_enabled=cors_enabled,
             cors_allowed_origins=cors_allowed_origins,
             openai_api_key=None,

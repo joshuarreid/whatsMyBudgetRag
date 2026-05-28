@@ -10,7 +10,7 @@ class OverviewSkill(Skill):
         category="analytics",
         context_key="overview",
         description="Load the high-level spend overview for the selected statement period.",
-        keywords=("overview", "summary", "spend", "total"),
+        keywords=("overview", "summary", "spend", "total", "gist", "spending like"),
     )
 
     def __init__(self, analytics_service: AnalyticsService) -> None:

@@ -16,6 +16,7 @@ class SettingsTests(unittest.TestCase):
             get_settings.cache_clear()
             settings = get_settings()
 
+        self.assertFalse(settings.langgraph_enabled)
         self.assertFalse(settings.cors_enabled)
         self.assertEqual(settings.cors_allowed_origins, ())
 
@@ -36,6 +37,7 @@ class SettingsTests(unittest.TestCase):
 
     def test_mysql_and_conversation_settings_load_from_environment(self) -> None:
         env = {
+            "LANGGRAPH_ENABLED": "true",
             "MYSQL_HOST": "db.example.com",
             "MYSQL_PORT": "25060",
             "MYSQL_DATABASE": "budget_rag",
@@ -51,6 +53,7 @@ class SettingsTests(unittest.TestCase):
             get_settings.cache_clear()
             settings = get_settings()
 
+        self.assertTrue(settings.langgraph_enabled)
         self.assertEqual(settings.mysql_host, "db.example.com")
         self.assertEqual(settings.mysql_port, 25060)
         self.assertEqual(settings.mysql_database, "budget_rag")

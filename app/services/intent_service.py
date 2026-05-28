@@ -81,6 +81,18 @@ CONTEXTUAL_ACCOUNT_REFERENCE_PATTERN = re.compile(
 )
 EXPLICIT_ACCOUNT_REFERENCE_PATTERNS = (
     re.compile(
+        r"\b(?P<account>[A-Za-z][A-Za-z0-9&/-]{0,40})['’]s\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bfor\s+(?P<account>[A-Za-z][A-Za-z0-9&/-]{0,30}(?:\s+[A-Za-z][A-Za-z0-9&/-]{0,30})?)\b[?!.,\s]*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:is\s+)?(?P<account>[A-Za-z][A-Za-z0-9 &'/-]{0,40})\s+on\s+track\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
         r"\b(?:account|acct)\s+(?:named|called)\s+[\"“'](?P<account>[^\"”']{1,80})[\"”']",
         re.IGNORECASE,
     ),
@@ -110,6 +122,19 @@ GENERIC_ACCOUNT_REFERENCE_VALUES = {
     "new",
     "an",
     "a",
+    "what",
+    "which",
+    "who",
+    "when",
+    "where",
+    "why",
+    "how",
+    "period",
+    "month",
+    "week",
+    "today",
+    "yesterday",
+    *(month.lower() for month in STATEMENT_PERIOD_MONTHS),
 }
 DAY_REFERENCE_PATTERNS = (
     (re.compile(r"\btoday\b", re.IGNORECASE), 0, "today resolves to a single-day inclusive date range"),

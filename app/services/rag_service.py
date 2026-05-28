@@ -33,6 +33,7 @@ from app.repositories import (
     NullConversationHistoryRepository,
 )
 from app.services.intent_service import IntentService
+from app.services.langgraph_reasoning_service import LangGraphReasoningService
 from app.services.planner_service import PlannerService
 from app.skills.base import Skill, SkillRequest
 from app.skills.registry import SkillRegistry
@@ -66,6 +67,7 @@ class RAGService:
         llm_service: Optional[Any] = None,
         conversation_history: Optional[ConversationHistoryRepository] = None,
         intent_service: Optional[Any] = None,
+        langgraph_service: Optional[LangGraphReasoningService] = None,
     ) -> None:
         self.spring = spring_client
         self.skill_registry = skill_registry
@@ -73,6 +75,7 @@ class RAGService:
         self.intent_service = intent_service
         self.intent_parser = intent_service or IntentService(enable_llm=False)
         self.planner = PlannerService(intent_service=self.intent_parser)
+        self.langgraph_service = langgraph_service
         settings = get_settings()
         self.conversation_history = conversation_history or NullConversationHistoryRepository()
         self.conversation_history_context_limit = settings.conversation_history_context_limit
@@ -130,7 +133,11 @@ class RAGService:
                 conversation_history=prior_messages,
                 llm_intent=llm_intent,
             )
-            selected_skills, routing_metadata = self._select_skills(question, llm_intent=llm_intent)
+            selected_skills, routing_metadata = self._select_skills(
+                question,
+                time_scope=selected_time_scope,
+                llm_intent=llm_intent,
+            )
             routing_metadata["intent_classification"] = {
                 "attempted": not intent_classification["skip"],
                 "skipped": intent_classification["skip"],
@@ -635,6 +642,7 @@ class RAGService:
         self,
         question: str,
         *,
+        time_scope: RagTimeScope,
         llm_intent: Optional[RagIntentResponse] = None,
     ) -> tuple[list[Skill], dict[str, Any]]:
         llm_selected_skills = self._optimize_skill_selection(
@@ -647,6 +655,29 @@ class RAGService:
             "deterministic_tools": [skill.skill_id for skill in deterministic_skills],
             "union_tools": self._union_skill_ids(llm_selected_skills, deterministic_skills),
         }
+        registry_skills = getattr(self.skill_registry, "skills", None)
+        if self.langgraph_service is not None and isinstance(registry_skills, list):
+            seed_skills = self._optimize_skill_selection(
+                question,
+                [*llm_selected_skills, *deterministic_skills],
+            )
+            graph_selected_skills, graph_metadata = self.langgraph_service.plan(
+                question=question,
+                time_scope=time_scope,
+                available_skills=registry_skills,
+                seed_skills=seed_skills,
+            )
+            if graph_metadata.get("applied"):
+                return self._optimize_skill_selection(question, graph_selected_skills), {
+                    "source": "langgraph_reasoning",
+                    "llm_intent": (
+                        llm_intent.model_dump(mode="json", exclude_none=True) if llm_intent is not None else None
+                    ),
+                    "resolved_skill_ids": [skill.skill_id for skill in graph_selected_skills],
+                    "llm_raw_suggested_tools": llm_intent.skill_ids if llm_intent is not None else [],
+                    "tool_selection": tool_selection,
+                    "reasoning_graph": graph_metadata,
+                }
 
         if llm_intent is not None:
             if llm_selected_skills:

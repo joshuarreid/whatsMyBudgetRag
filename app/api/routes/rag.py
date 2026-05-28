@@ -16,6 +16,7 @@ from app.repositories import (
 from app.services.analytics_service import AnalyticsService
 from app.services.insight_service import InsightService
 from app.services.intent_service import IntentService
+from app.services.langgraph_reasoning_service import LangGraphReasoningService
 from app.services.llm_service import LLMService
 from app.services.rag_service import RAGService
 from app.skills.factories import build_skill_registry
@@ -31,6 +32,7 @@ def get_conversation_history_repository() -> MySQLConversationHistoryRepository:
 
 @lru_cache(maxsize=1)
 def get_rag_service() -> RAGService:
+    settings = get_settings()
     client = SpringBootClient()
     analytics = AnalyticsService(client)
     insights = InsightService(client, analytics)
@@ -38,7 +40,15 @@ def get_rag_service() -> RAGService:
     llm_service = LLMService()
     intent_service = IntentService()
     history_repository = get_conversation_history_repository()
-    return RAGService(client, skill_registry, llm_service, history_repository, intent_service=intent_service)
+    langgraph_service = LangGraphReasoningService(enabled=settings.langgraph_enabled)
+    return RAGService(
+        client,
+        skill_registry,
+        llm_service,
+        history_repository,
+        intent_service=intent_service,
+        langgraph_service=langgraph_service,
+    )
 
 
 @router.post("/ask", response_model=RagAnswerResponse)

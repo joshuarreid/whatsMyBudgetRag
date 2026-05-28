@@ -12,7 +12,7 @@ class CriticalitySkill(Skill):
         category="analytics",
         context_key="criticality",
         description="Load the criticality breakdown for the selected statement period.",
-        keywords=("criticality", "essential", "non-essential"),
+        keywords=("criticality", "essential", "non-essential", "nonessential", "essential versus nonessential"),
     )
 
     def __init__(self, spring_client: SpringBootClient) -> None:

@@ -12,7 +12,7 @@ class CategoriesSkill(Skill):
         category="analytics",
         context_key="categories",
         description="Load the category spend breakdown for the selected statement period.",
-        keywords=("category", "categories"),
+        keywords=("category", "categories", "what were the categories", "include categories"),
     )
 
     def __init__(self, spring_client: SpringBootClient) -> None:

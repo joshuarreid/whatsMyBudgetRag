@@ -12,7 +12,7 @@ class AccountBreakdownSkill(Skill):
         category="analytics",
         context_key="account_breakdown",
         description="Load the account breakdown for the selected statement period.",
-        keywords=("account", "breakdown"),
+        keywords=("account", "accounts", "account breakdown", "breakdown", "which account", "which accounts"),
     )
 
     def __init__(self, spring_client: SpringBootClient) -> None:

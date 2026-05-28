@@ -5,7 +5,7 @@ from datetime import date
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from app.models.schemas import RagIntentResponse
+from app.models.schemas import RagIntentFilters, RagIntentResponse
 from app.services.intent_service import IntentService
 
 
@@ -205,7 +205,7 @@ class IntentServiceInferenceTests(unittest.TestCase):
     def test_infer_account_prefers_explicit_question_reference_over_llm_hint(self) -> None:
         inferred_account = self.service.infer_account(
             question="What was my spend on Checking account?",
-            llm_intent=RagIntentResponse(filters={"account": "Savings"}),
+            llm_intent=RagIntentResponse(filters=RagIntentFilters(account="Savings")),
         )
 
         self.assertIsNotNone(inferred_account)
@@ -215,7 +215,7 @@ class IntentServiceInferenceTests(unittest.TestCase):
     def test_infer_account_uses_llm_hint_when_question_has_no_explicit_account(self) -> None:
         inferred_account = self.service.infer_account(
             question="How much did I spend?",
-            llm_intent=RagIntentResponse(filters={"account": "Travel Card"}),
+            llm_intent=RagIntentResponse(filters=RagIntentFilters(account="Travel Card")),
         )
 
         self.assertIsNotNone(inferred_account)
@@ -229,6 +229,7 @@ class IntentServiceInferenceTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(inferred_account)
+        assert inferred_account is not None
         self.assertEqual(inferred_account["source"], "question_contextual_account_reference")
         self.assertNotIn("resolved_account", inferred_account)
 
@@ -239,6 +240,39 @@ class IntentServiceInferenceTests(unittest.TestCase):
         )
 
         self.assertIsNone(inferred_account)
+
+    def test_infer_account_recognizes_possessive_person_reference(self) -> None:
+        inferred_account = self.service.infer_account(
+            question="In March what was Anna's biggest transaction?",
+            llm_intent=None,
+        )
+
+        self.assertIsNotNone(inferred_account)
+        assert inferred_account is not None
+        self.assertEqual(inferred_account["resolved_account"], "Anna")
+        self.assertEqual(inferred_account["source"], "question_explicit_account")
+
+    def test_infer_account_recognizes_trailing_for_name_reference(self) -> None:
+        inferred_account = self.service.infer_account(
+            question="How does december look for anna?",
+            llm_intent=None,
+        )
+
+        self.assertIsNotNone(inferred_account)
+        assert inferred_account is not None
+        self.assertEqual(inferred_account["resolved_account"], "anna")
+        self.assertEqual(inferred_account["source"], "question_explicit_account")
+
+    def test_infer_account_recognizes_on_track_name_reference(self) -> None:
+        inferred_account = self.service.infer_account(
+            question="Is Josh on track to spend less than $1500 on nonessential stuff this month?",
+            llm_intent=None,
+        )
+
+        self.assertIsNotNone(inferred_account)
+        assert inferred_account is not None
+        self.assertEqual(inferred_account["resolved_account"], "Josh")
+        self.assertEqual(inferred_account["source"], "question_explicit_account")
 
 
 if __name__ == "__main__":

@@ -12,7 +12,16 @@ class OutliersSkill(Skill):
         category="analytics",
         context_key="outliers",
         description="Load outlier transactions for the selected statement period.",
-        keywords=("outlier", "largest"),
+        keywords=(
+            "outlier",
+            "largest",
+            "largest transaction",
+            "largest transactions",
+            "biggest transaction",
+            "biggest transactions",
+            "largest purchase",
+            "biggest purchase",
+        ),
     )
 
     def __init__(self, spring_client: SpringBootClient) -> None:

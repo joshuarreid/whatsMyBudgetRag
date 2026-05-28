@@ -12,7 +12,7 @@ class PaymentMethodsSkill(Skill):
         category="analytics",
         context_key="payment_methods",
         description="Load the payment method breakdown for the selected statement period.",
-        keywords=("payment method", "card", "cash"),
+        keywords=("payment method", "payment methods", "card", "cards", "cash", "credit", "debit"),
     )
 
     def __init__(self, spring_client: SpringBootClient) -> None:

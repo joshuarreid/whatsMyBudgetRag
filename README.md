@@ -52,6 +52,7 @@ SPRING_BOOT_BASE_URL=http://springboot-api
 HTTP_TIMEOUT_SECONDS=10
 LOG_LEVEL=INFO
 LOG_FORMAT=text
+LANGGRAPH_ENABLED=false
 CORS_ENABLED=false
 CORS_ALLOWED_ORIGINS=
 OPENAI_API_KEY=
@@ -75,6 +76,7 @@ Notes:
 - `SPRING_BOOT_BASE_URL` should point at the Spring Boot service.
 - `LOG_LEVEL` controls application and request logging verbosity.
 - `LOG_FORMAT` accepts `text` or `json` for human-readable or structured logs.
+- `LANGGRAPH_ENABLED` turns on graph-based skill-family reasoning for multi-step finance questions such as comparisons, driver analysis, anomaly investigation, and narrative summaries.
 - `CORS_ENABLED` toggles FastAPI CORS middleware on or off.
 - `CORS_ALLOWED_ORIGINS` accepts a comma-separated list of allowed browser origins when CORS is enabled.
 - If `OPENAI_API_KEY` is unset, the `/rag/ask` endpoint still works and returns a deterministic summary from the fetched API context.
@@ -94,6 +96,24 @@ CORS_ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
 ```
 
 The natural-language endpoint remains `POST /rag/ask`, so browser clients should target `/rag/ask` rather than `/ask`.
+
+## LangGraph Reasoning Mode
+
+When `LANGGRAPH_ENABLED=true`, the RAG router can expand beyond direct keyword matches and select additional skill families using a LangGraph state machine:
+
+- **Baseline / summary**: `overview`, `available_periods`, `statement_period_summary`, `statement_period_summary_range`
+- **Driver analysis**: `categories`, `top_categories`, `account_breakdown`, `payment_methods`, `criticality`
+- **Pattern / anomaly**: `daily`, `duplicates`, `outliers`, `uncategorized`
+- **Derived narrative**: `averages`, `month_over_month`, `period_summary`, `behavior_summary`
+
+This is most useful for questions such as:
+
+- “Why did my spending jump in April versus March?”
+- “Show my daily trend and highlight outliers.”
+- “What should I focus on this month?”
+- “Compare two months and tell me what drove the change.”
+
+The response context will include `routing.reasoning_graph` metadata so you can inspect which families and skills the graph selected.
 
 Outbound Spring Boot requests now automatically include `X-Transaction-ID` and `X-Request-ID`. If an inbound request provides `X-Transaction-ID`, that value is reused; otherwise the app falls back to the current request ID.
 
