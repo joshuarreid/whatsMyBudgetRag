@@ -53,7 +53,7 @@ def get_settings() -> Settings:
         request_timeout_seconds=float(os.getenv("HTTP_TIMEOUT_SECONDS", "10")),
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
         log_format=os.getenv("LOG_FORMAT", "text").lower(),
-        langgraph_enabled=_env_flag("LANGGRAPH_ENABLED", default=False),
+        langgraph_enabled=_env_flag("LANGGRAPH_ENABLED", default=True),
         cors_enabled=_env_flag("CORS_ENABLED", default=False),
         cors_allowed_origins=_env_csv("CORS_ALLOWED_ORIGINS"),
         openai_api_key=os.getenv("OPENAI_API_KEY") or None,

@@ -1060,7 +1060,19 @@ class RAGService:
     def _deterministic_answer(self, context: dict[str, Any]) -> Optional[str]:
         if self._is_deterministic_daily_range_context(context):
             return self._deterministic_daily_range_answer(context)
+        if self._is_deterministic_single_scope_daily_context(context):
+            return self._deterministic_single_scope_daily_answer(context)
         return None
+
+    def _daily_sections(self, context: dict[str, Any]) -> list[tuple[str, list[dict[str, Any]], list[dict[str, Any]]]]:
+        daily_sections: list[tuple[str, list[dict[str, Any]], list[dict[str, Any]]]] = []
+        for key, value in context.items():
+            if not self._is_daily_context_key(key) or not isinstance(value, list):
+                continue
+            normalized_rows, conflicts = self._normalize_daily_rows(value)
+            daily_sections.append((self._daily_context_label(context, key), normalized_rows, conflicts))
+        daily_sections.sort(key=lambda item: self._parse_period_label(item[0]) or date.max)
+        return daily_sections
 
     @staticmethod
     def _plan_skill_ids(context: dict[str, Any]) -> list[str]:
@@ -1081,6 +1093,16 @@ class RAGService:
         plan_skill_ids = self._plan_skill_ids(context)
         return bool(plan_skill_ids) and all(skill_id == "daily" for skill_id in plan_skill_ids)
 
+    def _is_deterministic_single_scope_daily_context(self, context: dict[str, Any]) -> bool:
+        time_scope = self._context_time_scope(context)
+        if time_scope is None or time_scope.scope_type != "date_range":
+            return False
+        daily_sections = self._daily_sections(context)
+        if len(daily_sections) != 1:
+            return False
+        plan_skill_ids = set(self._plan_skill_ids(context))
+        return bool(plan_skill_ids) and plan_skill_ids.issubset({"overview", "daily"})
+
     @staticmethod
     def _trend_direction(current_value: Decimal, next_value: Decimal) -> str:
         if next_value > current_value:
@@ -1090,17 +1112,9 @@ class RAGService:
         return "stayed flat"
 
     def _deterministic_daily_range_answer(self, context: dict[str, Any]) -> str:
-        daily_sections: list[tuple[str, list[dict[str, Any]], list[dict[str, Any]]]] = []
-        for key, value in context.items():
-            if not self._is_daily_context_key(key) or not isinstance(value, list):
-                continue
-            normalized_rows, conflicts = self._normalize_daily_rows(value)
-            daily_sections.append((self._daily_context_label(context, key), normalized_rows, conflicts))
-
+        daily_sections = self._daily_sections(context)
         if not daily_sections:
             return self._fallback_answer(context)
-
-        daily_sections.sort(key=lambda item: self._parse_period_label(item[0]) or date.max)
         scope = self._context_time_scope(context)
         resolved_label = self._time_scope_label(scope) if scope is not None else "selected range"
         lines = [f"Period resolved: {resolved_label}.", "", "## Daily spending trend"]
@@ -1166,6 +1180,52 @@ class RAGService:
                 lines.append(
                     f"- {row['date']}: ${self._format_decimal(row['total_amount'])} across {row['transaction_count']} transactions"
                 )
+
+        return "\n".join(lines)
+
+    def _deterministic_single_scope_daily_answer(self, context: dict[str, Any]) -> str:
+        daily_sections = self._daily_sections(context)
+        if len(daily_sections) != 1:
+            return self._fallback_answer(context)
+
+        _, rows, conflicts = daily_sections[0]
+        if not rows:
+            return self._fallback_answer(context)
+
+        time_scope = self._context_time_scope(context)
+        resolved_label = self._time_scope_label(time_scope) if time_scope is not None else "the selected range"
+        total_spend = sum((row["total_amount"] for row in rows), start=Decimal("0"))
+        transaction_count = sum(row["transaction_count"] for row in rows)
+        average_daily_spend = total_spend / len(rows)
+        peak_day = max(rows, key=lambda row: row["total_amount"], default=None)
+
+        lines = [f"Here's what I found for {resolved_label}:", ""]
+        lines.append(f"- Date range: {rows[0]['date']} -> {rows[-1]['date']}")
+        lines.append(f"- Total spend: ${self._format_decimal(total_spend)}")
+        lines.append(f"- Transaction count: {transaction_count}")
+        lines.append(f"- Average daily spend: ${self._format_decimal(average_daily_spend)}")
+        if peak_day is not None:
+            lines.append(
+                f"- Peak day: {peak_day['date']} - ${self._format_decimal(peak_day['total_amount'])} ({peak_day['transaction_count']} transactions)"
+            )
+
+        if conflicts:
+            lines.extend(["", "## Data notes"])
+            for conflict in conflicts:
+                reported = ", ".join(
+                    f"${item['total_amount']} ({item['transaction_count']} txns)"
+                    for item in conflict["reported_values"]
+                )
+                selected = conflict["selected_value"]
+                lines.append(
+                    f"- {conflict['date']}: reported values {reported}; used ${selected['total_amount']} ({selected['transaction_count']} txns)."
+                )
+
+        lines.extend(["", "## Daily totals"])
+        for row in rows:
+            lines.append(
+                f"- {row['date']}: ${self._format_decimal(row['total_amount'])} across {row['transaction_count']} transactions"
+            )
 
         return "\n".join(lines)
 

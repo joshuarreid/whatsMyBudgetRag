@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Optional
 
 from openai import OpenAI
@@ -35,8 +36,12 @@ class LLMService:
             "Statement periods always use MonthYear format such as October2025 or May2026. "
             "Use timeline_context and period_interpretation to resolve references like this month, current month, this period, last month, previous month, or a bare month name such as October. "
             "Use the provided skill outputs and any unavailable_tools notes when deciding what evidence was available. "
-            "If the data is insufficient, say so clearly.\n\n"
-            "Your response should be readable for a mobile chat window"
+            "If the data is insufficient, say so clearly. "
+            "Format the response as compact GitHub-flavored markdown for a narrow mobile chat window. "
+            "Use a short opening sentence followed by short bullet lists when helpful. "
+            "Do not use tables. Use real line breaks and never emit escaped newline sequences like \\n. "
+            "If daily totals are present in the context, summarize or list them directly instead of claiming they need to be fetched. "
+            "Do not ask follow-up fetch questions unless the context explicitly indicates missing or unavailable data.\n\n"
             f"Question:\n{question}\n\n"
             f"Context:\n{json.dumps(context, default=str, indent=2)}"
         )
@@ -48,5 +53,17 @@ class LLMService:
         )
         response = self.client.responses.create(model=self.model, input=prompt)
         logger.info("LLM response received model=%s output_length=%s", self.model, len(response.output_text))
-        return response.output_text.strip()
+        return self._normalize_answer_text(response.output_text)
+
+    @classmethod
+    def _normalize_answer_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) >= 2 and normalized[0] == normalized[-1] and normalized[0] in {'"', "'"} and "\\n" in normalized:
+            normalized = normalized[1:-1]
+        normalized = normalized.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "  ")
+        normalized = normalized.replace('\\"', '"')
+        normalized = normalized.replace("\r\n", "\n").replace("\r", "\n")
+        normalized = "\n".join(line.rstrip() for line in normalized.split("\n"))
+        normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+        return normalized.strip()
 

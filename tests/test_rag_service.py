@@ -668,6 +668,47 @@ class RAGServiceLatencyOptimizationTests(unittest.TestCase):
         self.assertIn("## Daily totals", response.answer)
         self.assertIn("2026-01-20: $2234.38 across 8 transactions", response.answer)
 
+    def test_deterministic_single_scope_daily_answer_uses_mobile_markdown_summary(self) -> None:
+        service = RAGService(Mock(), Mock(), None)
+
+        answer = service._deterministic_answer(
+            {
+                "time_scope": {
+                    "scope_type": "date_range",
+                    "start_date": "2026-04-01",
+                    "end_date": "2026-04-07",
+                },
+                "execution_plan": {
+                    "strategy": "single_scope",
+                    "steps": [
+                        {"skill_id": "overview", "output_key": "overview"},
+                        {"skill_id": "daily", "output_key": "daily_totals"},
+                    ],
+                },
+                "overview": {"total_amount": "2235.01", "transaction_count": 44},
+                "daily_totals": [
+                    {"date": "2026-04-01", "total_amount": "100.00", "transaction_count": 4},
+                    {"date": "2026-04-02", "total_amount": "250.00", "transaction_count": 7},
+                    {"date": "2026-04-03", "total_amount": "300.00", "transaction_count": 8},
+                    {"date": "2026-04-04", "total_amount": "200.00", "transaction_count": 5},
+                    {"date": "2026-04-05", "total_amount": "199.26", "transaction_count": 6},
+                    {"date": "2026-04-06", "total_amount": "400.00", "transaction_count": 8},
+                    {"date": "2026-04-07", "total_amount": "785.75", "transaction_count": 6},
+                ],
+            }
+        )
+
+        assert answer is not None
+        self.assertIn("Here's what I found for 2026-04-01 through 2026-04-07:", answer)
+        self.assertIn("- Date range: 2026-04-01 -> 2026-04-07", answer)
+        self.assertIn("- Total spend: $2235.01", answer)
+        self.assertIn("- Transaction count: 44", answer)
+        self.assertIn("- Average daily spend: $319.29", answer)
+        self.assertIn("- Peak day: 2026-04-07 - $785.75 (6 transactions)", answer)
+        self.assertIn("## Daily totals", answer)
+        self.assertIn("- 2026-04-01: $100.00 across 4 transactions", answer)
+        self.assertNotIn("\\n", answer)
+
 
 class RAGServiceLangGraphReasoningTests(unittest.TestCase):
     def test_select_skills_can_expand_reasoning_families_with_langgraph(self) -> None:
