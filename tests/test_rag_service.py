@@ -57,6 +57,26 @@ class SleepingSkill(Skill):
         )
 
 
+class ScriptedDailySkill(Skill):
+    def __init__(self, payloads_by_period: dict[str, list[dict[str, object]]]) -> None:
+        self.definition = SkillDefinition(
+            skill_id="daily",
+            category="analytics",
+            context_key="daily_totals",
+            description="Scripted daily totals",
+            keywords=("daily", "trend"),
+        )
+        self.payloads_by_period = payloads_by_period
+
+    def execute(self, request: SkillRequest) -> SkillResult:
+        period = request.period or (request.time_scope.statement_period if request.time_scope is not None else None)
+        return SkillResult(
+            skill_id=self.skill_id,
+            context_key=self.context_key,
+            payload=list(self.payloads_by_period.get(period or "", [])),
+        )
+
+
 class RAGServicePeriodResolutionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.spring = Mock()
@@ -559,6 +579,93 @@ class RAGServiceLatencyOptimizationTests(unittest.TestCase):
         self.assertIn("daily_totals_december2025", response.context)
         self.assertIn("daily_totals_january2026", response.context)
         self.assertIn("daily_totals_february2026", response.context)
+
+    def test_answer_compacts_daily_context_before_calling_llm(self) -> None:
+        registry = SkillRegistry(
+            [
+                ScriptedDailySkill(
+                    {
+                        "December2025": [
+                            {"date": "2025-12-02", "total_amount": "48.00", "transaction_count": 1},
+                            {"date": "2025-12-23", "total_amount": "503.22", "transaction_count": 10},
+                        ],
+                        "January2026": [{"date": "2026-01-20", "total_amount": "2234.38", "transaction_count": 8}],
+                        "February2026": [{"date": "2026-02-28", "total_amount": "574.08", "transaction_count": 5}],
+                    }
+                )
+            ]
+        )
+        llm = Mock()
+        llm.classify_intent.return_value = SimpleNamespace(skill_ids=["daily"])
+        llm.generate_answer.return_value = "Compact answer"
+        service = RAGService(Mock(), registry, llm)
+
+        answer_context = service._build_answer_context(
+            {
+                "question": "Show my daily trend from December through February",
+                "time_scope": {
+                    "scope_type": "statement_period_range",
+                    "start_period": "December2025",
+                    "end_period": "February2026",
+                },
+                "daily_totals_december2025": [
+                    {"date": "2025-12-02", "total_amount": "48.00", "transaction_count": 1},
+                    {"date": "2025-12-23", "total_amount": "503.22", "transaction_count": 10},
+                ],
+                "daily_totals_january2026": [
+                    {"date": "2026-01-20", "total_amount": "2234.38", "transaction_count": 8}
+                ],
+                "execution_plan": {
+                    "strategy": "multi_scope",
+                    "steps": [
+                        {"output_key": "daily_totals_december2025", "label": "December2025", "skill_id": "daily"},
+                        {"output_key": "daily_totals_january2026", "label": "January2026", "skill_id": "daily"},
+                    ],
+                },
+                "routing": {"source": "keyword_match"},
+                "supporting_sources": [{"source_ref": "api://daily"}],
+            }
+        )
+
+        self.assertNotIn("daily_totals_december2025", answer_context)
+        self.assertNotIn("daily_totals_january2026", answer_context)
+        self.assertIn("daily_trend_summary", answer_context)
+        self.assertEqual(answer_context["daily_trend_summary"]["series"][0]["label"], "December2025")
+        self.assertEqual(answer_context["daily_trend_summary"]["series"][0]["peak_day"]["total_amount"], "503.22")
+
+    def test_answer_uses_deterministic_daily_range_response_and_skips_llm_generation(self) -> None:
+        registry = SkillRegistry(
+            [
+                ScriptedDailySkill(
+                    {
+                        "December2025": [
+                            {"date": "2025-12-02", "total_amount": "48.00", "transaction_count": 1},
+                            {"date": "2025-12-23", "total_amount": "503.22", "transaction_count": 10},
+                        ],
+                        "January2026": [
+                            {"date": "2026-01-20", "total_amount": "2234.38", "transaction_count": 8},
+                            {"date": "2026-01-21", "total_amount": "1177.02", "transaction_count": 4},
+                        ],
+                        "February2026": [{"date": "2026-02-28", "total_amount": "574.08", "transaction_count": 5}],
+                    }
+                )
+            ]
+        )
+        llm = Mock()
+        llm.classify_intent.return_value = None
+        llm.generate_answer.return_value = "LLM answer"
+        service = RAGService(Mock(), registry, llm)
+
+        response = service.answer(question="Show my daily spending trend from December through February")
+
+        llm.generate_answer.assert_not_called()
+        self.assertEqual(response.plan, ["daily", "daily", "daily"])
+        self.assertIn("## Daily spending trend", response.answer)
+        self.assertIn("December2025", response.answer)
+        self.assertIn("January2026", response.answer)
+        self.assertIn("February2026", response.answer)
+        self.assertIn("## Daily totals", response.answer)
+        self.assertIn("2026-01-20: $2234.38 across 8 transactions", response.answer)
 
 
 class RAGServiceConversationHistoryTests(unittest.TestCase):

@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from time import perf_counter
 from typing import Any, Optional
 
@@ -51,6 +52,8 @@ ANSWER_CONTEXT_EXCLUDED_KEYS = {
     "supporting_sources",
     "tool_trace_summaries",
 }
+DAILY_CONTEXT_KEY_PREFIX = "daily_totals"
+DECIMAL_CENTS = Decimal("0.01")
 
 
 class RAGService:
@@ -176,9 +179,12 @@ class RAGService:
                 conversation_history=prior_messages,
             )
             plan_execution_latency_ms = int((perf_counter() - plan_execution_started_at) * 1000)
-            answer_context = self._build_answer_context(context)
             answer_generation_started_at = perf_counter()
-            llm_answer = self.llm.generate_answer(question, answer_context) if self.llm else None
+            deterministic_answer = self._deterministic_answer(context)
+            llm_answer = None
+            if deterministic_answer is None:
+                answer_context = self._build_answer_context(context)
+                llm_answer = self.llm.generate_answer(question, answer_context) if self.llm else None
             answer_generation_latency_ms = int((perf_counter() - answer_generation_started_at) * 1000)
             timing_metadata = self._build_timing_metadata(
                 tool_traces=tool_traces,
@@ -186,7 +192,7 @@ class RAGService:
                 plan_execution_latency_ms=plan_execution_latency_ms,
                 answer_generation_latency_ms=answer_generation_latency_ms,
             )
-            answer = llm_answer or self._fallback_answer(context)
+            answer = deterministic_answer or llm_answer or self._fallback_answer(context)
             assistant_message = self._persist_message(
                 resolved_conversation_id,
                 role="assistant",
@@ -822,6 +828,7 @@ class RAGService:
 
     def _build_answer_context(self, context: dict[str, Any]) -> dict[str, Any]:
         answer_context: dict[str, Any] = {}
+        daily_compact_sections: dict[str, Any] = {}
         for key, value in context.items():
             if key in ANSWER_CONTEXT_EXCLUDED_KEYS:
                 continue
@@ -836,8 +843,304 @@ class RAGService:
                     if isinstance(item, dict)
                 ]
                 continue
+            if self._is_daily_context_key(key) and isinstance(value, list):
+                daily_compact_sections[key] = self._compact_daily_series(
+                    context_key=key,
+                    rows=value,
+                    label=self._daily_context_label(context, key),
+                )
+                continue
             answer_context[key] = value
+        if daily_compact_sections:
+            answer_context["daily_trend_summary"] = self._compact_daily_trend_summary(context, daily_compact_sections)
         return answer_context
+
+    @classmethod
+    def _is_daily_context_key(cls, key: str) -> bool:
+        return key == DAILY_CONTEXT_KEY_PREFIX or key.startswith(f"{DAILY_CONTEXT_KEY_PREFIX}_")
+
+    @staticmethod
+    def _format_decimal(value: Decimal) -> str:
+        return format(value.quantize(DECIMAL_CENTS), "f")
+
+    @staticmethod
+    def _to_decimal(value: Any) -> Decimal:
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            return Decimal("0")
+
+    @staticmethod
+    def _to_int(value: Any) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _parse_iso_date(value: Any) -> Optional[date]:
+        if isinstance(value, date):
+            return value
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _parse_period_label(period: Optional[str]) -> Optional[date]:
+        if not isinstance(period, str) or not period.strip():
+            return None
+        try:
+            return datetime.strptime(period.strip(), "%B%Y").date()
+        except ValueError:
+            return None
+
+    @classmethod
+    def _sort_period_labels(cls, periods: list[str]) -> list[str]:
+        return sorted(
+            periods,
+            key=lambda period: cls._parse_period_label(period) or date.max,
+        )
+
+    def _daily_context_label(self, context: dict[str, Any], context_key: str) -> str:
+        execution_plan = context.get("execution_plan")
+        if isinstance(execution_plan, dict):
+            steps = execution_plan.get("steps")
+            if isinstance(steps, list):
+                for step in steps:
+                    if not isinstance(step, dict):
+                        continue
+                    if step.get("output_key") == context_key and isinstance(step.get("label"), str):
+                        return str(step["label"])
+        if context_key == DAILY_CONTEXT_KEY_PREFIX:
+            return context.get("period") or "selected period"
+        suffix = context_key[len(f"{DAILY_CONTEXT_KEY_PREFIX}_") :] if context_key.startswith(f"{DAILY_CONTEXT_KEY_PREFIX}_") else context_key
+        if suffix:
+            parts = [part.capitalize() for part in suffix.split("_") if part]
+            if parts:
+                return "".join(parts)
+        return context_key
+
+    def _normalize_daily_rows(self, rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        grouped_rows: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            row_date = self._parse_iso_date(row.get("date"))
+            if row_date is None:
+                continue
+            normalized_row = {
+                "date": row_date.isoformat(),
+                "date_value": row_date,
+                "total_amount": self._to_decimal(row.get("total_amount")),
+                "transaction_count": self._to_int(row.get("transaction_count")),
+            }
+            grouped_rows.setdefault(row_date.isoformat(), []).append(normalized_row)
+
+        normalized_rows: list[dict[str, Any]] = []
+        conflicts: list[dict[str, Any]] = []
+        for row_date in sorted(grouped_rows.keys()):
+            entries = grouped_rows[row_date]
+            unique_entries: list[tuple[Decimal, int]] = []
+            for entry in entries:
+                signature = (entry["total_amount"], entry["transaction_count"])
+                if signature not in unique_entries:
+                    unique_entries.append(signature)
+            chosen_entry = max(entries, key=lambda entry: (entry["total_amount"], entry["transaction_count"]))
+            normalized_rows.append(chosen_entry)
+            if len(unique_entries) > 1:
+                conflicts.append(
+                    {
+                        "date": row_date,
+                        "reported_values": [
+                            {
+                                "total_amount": self._format_decimal(total_amount),
+                                "transaction_count": transaction_count,
+                            }
+                            for total_amount, transaction_count in unique_entries
+                        ],
+                        "selected_value": {
+                            "total_amount": self._format_decimal(chosen_entry["total_amount"]),
+                            "transaction_count": chosen_entry["transaction_count"],
+                        },
+                    }
+                )
+        return normalized_rows, conflicts
+
+    def _compact_daily_series(self, *, context_key: str, rows: list[dict[str, Any]], label: str) -> dict[str, Any]:
+        normalized_rows, conflicts = self._normalize_daily_rows(rows)
+        total_spend = sum((row["total_amount"] for row in normalized_rows), start=Decimal("0"))
+        total_transactions = sum(row["transaction_count"] for row in normalized_rows)
+        peak_day = max(normalized_rows, key=lambda row: row["total_amount"], default=None)
+        return {
+            "context_key": context_key,
+            "label": label,
+            "active_days": len(normalized_rows),
+            "total_spend": self._format_decimal(total_spend),
+            "transaction_count": total_transactions,
+            "average_daily_spend": self._format_decimal(total_spend / len(normalized_rows)) if normalized_rows else "0.00",
+            "date_range": {
+                "start_date": normalized_rows[0]["date"] if normalized_rows else None,
+                "end_date": normalized_rows[-1]["date"] if normalized_rows else None,
+            },
+            "peak_day": (
+                {
+                    "date": peak_day["date"],
+                    "total_amount": self._format_decimal(peak_day["total_amount"]),
+                    "transaction_count": peak_day["transaction_count"],
+                }
+                if peak_day is not None
+                else None
+            ),
+            "conflicts": conflicts,
+        }
+
+    def _compact_daily_trend_summary(
+        self,
+        context: dict[str, Any],
+        daily_compact_sections: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        ordered_sections = [
+            daily_compact_sections[key]
+            for key in sorted(
+                daily_compact_sections.keys(),
+                key=lambda item: self._parse_period_label(self._daily_context_label(context, item)) or date.max,
+            )
+        ]
+        highest_peak = max(
+            (section["peak_day"] for section in ordered_sections if isinstance(section.get("peak_day"), dict)),
+            key=lambda peak: self._to_decimal(peak.get("total_amount")),
+            default=None,
+        )
+        return {
+            "range_label": self._time_scope_label(
+                RagTimeScope.model_validate(context.get("time_scope", {"scope_type": "statement_period"}))
+            ),
+            "series": ordered_sections,
+            "highest_peak_day": highest_peak,
+            "conflicts": [
+                {"label": section["label"], "items": section["conflicts"]}
+                for section in ordered_sections
+                if section.get("conflicts")
+            ],
+        }
+
+    def _deterministic_answer(self, context: dict[str, Any]) -> Optional[str]:
+        if self._is_deterministic_daily_range_context(context):
+            return self._deterministic_daily_range_answer(context)
+        return None
+
+    @staticmethod
+    def _plan_skill_ids(context: dict[str, Any]) -> list[str]:
+        execution_plan = context.get("execution_plan")
+        if not isinstance(execution_plan, dict):
+            return []
+        steps = execution_plan.get("steps")
+        if not isinstance(steps, list):
+            return []
+        return [str(step.get("skill_id")) for step in steps if isinstance(step, dict) and step.get("skill_id")]
+
+    def _is_deterministic_daily_range_context(self, context: dict[str, Any]) -> bool:
+        time_scope_payload = context.get("time_scope")
+        if not isinstance(time_scope_payload, dict):
+            return False
+        try:
+            time_scope = RagTimeScope.model_validate(time_scope_payload)
+        except Exception:
+            return False
+        if time_scope.scope_type != "statement_period_range":
+            return False
+        plan_skill_ids = self._plan_skill_ids(context)
+        return bool(plan_skill_ids) and all(skill_id == "daily" for skill_id in plan_skill_ids)
+
+    @staticmethod
+    def _trend_direction(current_value: Decimal, next_value: Decimal) -> str:
+        if next_value > current_value:
+            return "increased"
+        if next_value < current_value:
+            return "decreased"
+        return "stayed flat"
+
+    def _deterministic_daily_range_answer(self, context: dict[str, Any]) -> str:
+        daily_sections: list[tuple[str, list[dict[str, Any]], list[dict[str, Any]]]] = []
+        for key, value in context.items():
+            if not self._is_daily_context_key(key) or not isinstance(value, list):
+                continue
+            normalized_rows, conflicts = self._normalize_daily_rows(value)
+            daily_sections.append((self._daily_context_label(context, key), normalized_rows, conflicts))
+
+        if not daily_sections:
+            return self._fallback_answer(context)
+
+        daily_sections.sort(key=lambda item: self._parse_period_label(item[0]) or date.max)
+        scope = RagTimeScope.model_validate(context.get("time_scope", {"scope_type": "statement_period_range"}))
+        lines = [f"Period resolved: {self._time_scope_label(scope)}.", "", "## Daily spending trend"]
+
+        monthly_totals: list[tuple[str, Decimal]] = []
+        overall_peak: Optional[tuple[str, dict[str, Any]]] = None
+        conflict_lines: list[str] = []
+
+        for label, rows, conflicts in daily_sections:
+            total_spend = sum((row["total_amount"] for row in rows), start=Decimal("0"))
+            average_daily_spend = total_spend / len(rows) if rows else Decimal("0")
+            peak_day = max(rows, key=lambda row: row["total_amount"], default=None)
+            monthly_totals.append((label, total_spend))
+            if peak_day is not None:
+                if overall_peak is None or peak_day["total_amount"] > overall_peak[1]["total_amount"]:
+                    overall_peak = (label, peak_day)
+            summary_line = (
+                f"- {label}: {len(rows)} active days, ${self._format_decimal(total_spend)} total spend, "
+                f"${self._format_decimal(average_daily_spend)} average spend on active days"
+            )
+            if peak_day is not None:
+                summary_line += (
+                    f", peak day {peak_day['date']} at ${self._format_decimal(peak_day['total_amount'])} "
+                    f"across {peak_day['transaction_count']} transactions"
+                )
+            summary_line += "."
+            lines.append(summary_line)
+            for conflict in conflicts:
+                reported = ", ".join(
+                    f"${item['total_amount']} ({item['transaction_count']} txns)"
+                    for item in conflict["reported_values"]
+                )
+                selected = conflict["selected_value"]
+                conflict_lines.append(
+                    f"- {label} {conflict['date']}: reported values {reported}; used ${selected['total_amount']} ({selected['transaction_count']} txns)."
+                )
+
+        trend_lines: list[str] = []
+        for index in range(len(monthly_totals) - 1):
+            current_label, current_total = monthly_totals[index]
+            next_label, next_total = monthly_totals[index + 1]
+            trend_lines.append(
+                f"- Total spend {self._trend_direction(current_total, next_total)} from {current_label} (${self._format_decimal(current_total)}) to {next_label} (${self._format_decimal(next_total)})."
+            )
+        if overall_peak is not None:
+            peak_label, peak_day = overall_peak
+            trend_lines.append(
+                f"- Highest daily spend in the range was {peak_day['date']} in {peak_label} at ${self._format_decimal(peak_day['total_amount'])}."
+            )
+        if trend_lines:
+            lines.extend(["", "## Overall observations", *trend_lines])
+        if conflict_lines:
+            lines.extend(["", "## Data notes", *conflict_lines])
+
+        lines.append("")
+        lines.append("## Daily totals")
+        for label, rows, _ in daily_sections:
+            lines.extend(["", f"### {label}"])
+            if not rows:
+                lines.append("- No in-scope daily totals were returned for this period.")
+                continue
+            for row in rows:
+                lines.append(
+                    f"- {row['date']}: ${self._format_decimal(row['total_amount'])} across {row['transaction_count']} transactions"
+                )
+
+        return "\n".join(lines)
 
     @staticmethod
     def _build_timing_metadata(

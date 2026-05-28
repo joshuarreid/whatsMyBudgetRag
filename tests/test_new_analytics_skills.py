@@ -8,6 +8,7 @@ from app.models.schemas import RagTimeScope
 from app.services.rag_service import RAGService
 from app.skills.analytics import (
     AvailablePeriodsSkill,
+    DailyTotalsSkill,
     OverviewSkill,
     StatementPeriodSummaryRangeSkill,
     StatementPeriodSummarySkill,
@@ -180,6 +181,34 @@ class StatementPeriodSummaryRangeSkillTests(unittest.TestCase):
         self.assertEqual(result.payload[0]["statement_period"], "January2026")
         self.assertEqual(result.payload[1]["statement_period"], "February2026")
         spring.get_statement_period_summary_for_time_scope.assert_called_once()
+
+
+class DailyTotalsSkillTests(unittest.TestCase):
+    def test_daily_skill_trims_rows_to_requested_statement_period(self) -> None:
+        spring = Mock()
+        spring.get_daily_totals_for_time_scope.return_value = [
+            {"date": "2025-12-31", "totalAmount": "25.00", "transactionCount": 1},
+            {"date": "2026-01-01", "totalAmount": "50.00", "transactionCount": 2},
+            {"date": "2026-01-15", "totalAmount": "75.00", "transactionCount": 3},
+            {"date": "2026-02-01", "totalAmount": "100.00", "transactionCount": 4},
+        ]
+        skill = DailyTotalsSkill(spring)
+
+        result = skill.execute(
+            SkillRequest(
+                question="Show my January daily trend",
+                time_scope=RagTimeScope(scope_type="statement_period", statement_period="January2026"),
+            )
+        )
+
+        self.assertEqual(
+            result.payload,
+            [
+                {"date": "2026-01-01", "total_amount": "50.00", "transaction_count": 2},
+                {"date": "2026-01-15", "total_amount": "75.00", "transaction_count": 3},
+            ],
+        )
+        spring.get_daily_totals_for_time_scope.assert_called_once()
 
 
 class AnalyticsRoutingCleanupTests(unittest.TestCase):
