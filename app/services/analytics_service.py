@@ -34,4 +34,4 @@ class AnalyticsService:
     def _resolve_time_scope(period: Optional[str]) -> RagTimeScope:
         if not period:
             raise ValueError("Analytics overview requires either a statement period or a date range time_scope")
-        return RagTimeScope(scope_type="statement_period", statement_period=period)
+        return RagTimeScope.from_period(period)

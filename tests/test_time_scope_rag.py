@@ -4,6 +4,8 @@ import unittest
 from datetime import date
 from unittest.mock import Mock
 
+from pydantic import ValidationError
+
 from app.models.schemas import RagIntentResponse, RagTimeScope
 from app.services.analytics_service import AnalyticsService
 from app.services.insight_service import InsightService
@@ -83,6 +85,49 @@ class RAGServiceDateRangeExecutionTests(unittest.TestCase):
         self.spring.get_account_breakdown_for_time_scope.assert_called()
         self.spring.get_payment_method_breakdown_for_time_scope.assert_called()
         self.spring.get_outliers_for_time_scope.assert_called()
+
+
+class RagTimeScopeValidationTests(unittest.TestCase):
+    def test_statement_period_scope_strips_whitespace(self) -> None:
+        scope = RagTimeScope(scope_type="statement_period", statement_period="  May2026  ")
+
+        self.assertEqual(scope.statement_period, "May2026")
+        self.assertEqual(scope.derived_period, "May2026")
+        self.assertEqual(scope.label, "May2026")
+
+    def test_statement_period_scope_rejects_mixed_range_fields(self) -> None:
+        with self.assertRaises(ValidationError):
+            RagTimeScope(
+                scope_type="statement_period",
+                statement_period="May2026",
+                start_period="April2026",
+            )
+
+    def test_statement_period_range_rejects_reverse_order(self) -> None:
+        with self.assertRaises(ValidationError):
+            RagTimeScope(
+                scope_type="statement_period_range",
+                start_period="June2026",
+                end_period="May2026",
+            )
+
+    def test_date_range_rejects_reverse_dates(self) -> None:
+        with self.assertRaises(ValidationError):
+            RagTimeScope(
+                scope_type="date_range",
+                start_date=date(2026, 5, 2),
+                end_date=date(2026, 5, 1),
+            )
+
+    def test_time_scope_rejects_extra_fields(self) -> None:
+        with self.assertRaises(ValidationError):
+            RagTimeScope.model_validate(
+                {
+                    "scope_type": "statement_period",
+                    "statement_period": "May2026",
+                    "unexpected": True,
+                }
+            )
 
 
 if __name__ == "__main__":

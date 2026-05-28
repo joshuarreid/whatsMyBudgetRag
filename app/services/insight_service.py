@@ -461,18 +461,12 @@ class InsightService:
         if time_scope is not None:
             return time_scope
         if period:
-            return RagTimeScope(scope_type="statement_period", statement_period=period)
+            return RagTimeScope.from_period(period)
         raise ValueError("Insight calculations require either a statement period or a date range time_scope")
 
     @staticmethod
     def _time_scope_label(time_scope: RagTimeScope) -> str:
-        if time_scope.scope_type == "statement_period" and time_scope.statement_period:
-            return time_scope.statement_period
-        if time_scope.scope_type == "statement_period_range" and time_scope.start_period and time_scope.end_period:
-            return f"{time_scope.start_period} through {time_scope.end_period}"
-        if time_scope.scope_type == "date_range" and time_scope.start_date and time_scope.end_date:
-            return f"{time_scope.start_date.isoformat()} through {time_scope.end_date.isoformat()}"
-        return time_scope.scope_type
+        return time_scope.label
 
     @staticmethod
     def _to_category_summary(

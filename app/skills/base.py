@@ -36,7 +36,7 @@ class SkillRequest:
         object.__setattr__(
             self,
             "time_scope",
-            RagTimeScope(scope_type="statement_period", statement_period=self.period),
+            RagTimeScope.from_period(self.period),
         )
 
 

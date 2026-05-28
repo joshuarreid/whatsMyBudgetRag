@@ -158,11 +158,11 @@ class PlannerService:
             return [
                 _PlannedScope(
                     label=left_period,
-                    time_scope=RagTimeScope(scope_type="statement_period", statement_period=left_period),
+                    time_scope=RagTimeScope.from_period(left_period),
                 ),
                 _PlannedScope(
                     label=right_period,
-                    time_scope=RagTimeScope(scope_type="statement_period", statement_period=right_period),
+                    time_scope=RagTimeScope.from_period(right_period),
                 ),
             ]
         return []
@@ -182,14 +182,13 @@ class PlannerService:
         )
 
     def _expand_statement_period_range(self, time_scope: RagTimeScope) -> list[_PlannedScope]:
-        start_period = time_scope.start_period
-        end_period = time_scope.end_period
-        if not start_period or not end_period:
+        if time_scope.scope_type != "statement_period_range":
             return []
-        start_reference = self._statement_period_to_date(start_period)
-        end_reference = self._statement_period_to_date(end_period)
-        if start_reference is None or end_reference is None or start_reference > end_reference:
-            return []
+
+        assert time_scope.start_period is not None
+        assert time_scope.end_period is not None
+        start_reference = RagTimeScope.parse_statement_period(time_scope.start_period)
+        end_reference = RagTimeScope.parse_statement_period(time_scope.end_period)
 
         scopes: list[_PlannedScope] = []
         current = start_reference
@@ -198,7 +197,7 @@ class PlannerService:
             scopes.append(
                 _PlannedScope(
                     label=statement_period,
-                    time_scope=RagTimeScope(scope_type="statement_period", statement_period=statement_period),
+                    time_scope=RagTimeScope.from_period(statement_period),
                 )
             )
             current = self.intent_service.shift_month(current, offset=1)
@@ -206,31 +205,11 @@ class PlannerService:
 
     @staticmethod
     def _derive_period(time_scope: RagTimeScope) -> Optional[str]:
-        if time_scope.scope_type == "statement_period":
-            return time_scope.statement_period
-        return None
-
-    @staticmethod
-    def _statement_period_to_date(statement_period: str) -> Optional[date]:
-        try:
-            return date.fromisoformat(f"{statement_period[-4:]}-{PlannerService._month_number(statement_period):02d}-01")
-        except (ValueError, IndexError):
-            return None
-
-    @staticmethod
-    def _month_number(statement_period: str) -> int:
-        month_name = statement_period[:-4]
-        return IntentService.month_number(month_name)
+        return time_scope.derived_period
 
     @staticmethod
     def _scope_label(time_scope: RagTimeScope) -> str:
-        if time_scope.scope_type == "statement_period":
-            return time_scope.statement_period or "statement_period"
-        if time_scope.scope_type == "statement_period_range":
-            return f"{time_scope.start_period or '?'}_through_{time_scope.end_period or '?'}"
-        if time_scope.scope_type == "date_range":
-            return f"{time_scope.start_date or '?'}_through_{time_scope.end_date or '?'}"
-        return time_scope.scope_type
+        return time_scope.label.replace(" through ", "_through_")
 
     @staticmethod
     def _slugify(value: str) -> str:

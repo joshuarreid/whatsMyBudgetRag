@@ -1002,6 +1002,7 @@ class RAGService:
         context: dict[str, Any],
         daily_compact_sections: dict[str, dict[str, Any]],
     ) -> dict[str, Any]:
+        time_scope = self._context_time_scope(context)
         ordered_sections = [
             daily_compact_sections[key]
             for key in sorted(
@@ -1015,9 +1016,7 @@ class RAGService:
             default=None,
         )
         return {
-            "range_label": self._time_scope_label(
-                RagTimeScope.model_validate(context.get("time_scope", {"scope_type": "statement_period"}))
-            ),
+            "range_label": self._time_scope_label(time_scope) if time_scope is not None else "selected range",
             "series": ordered_sections,
             "highest_peak_day": highest_peak,
             "conflicts": [
@@ -1043,12 +1042,8 @@ class RAGService:
         return [str(step.get("skill_id")) for step in steps if isinstance(step, dict) and step.get("skill_id")]
 
     def _is_deterministic_daily_range_context(self, context: dict[str, Any]) -> bool:
-        time_scope_payload = context.get("time_scope")
-        if not isinstance(time_scope_payload, dict):
-            return False
-        try:
-            time_scope = RagTimeScope.model_validate(time_scope_payload)
-        except Exception:
+        time_scope = self._context_time_scope(context)
+        if time_scope is None:
             return False
         if time_scope.scope_type != "statement_period_range":
             return False
@@ -1075,8 +1070,9 @@ class RAGService:
             return self._fallback_answer(context)
 
         daily_sections.sort(key=lambda item: self._parse_period_label(item[0]) or date.max)
-        scope = RagTimeScope.model_validate(context.get("time_scope", {"scope_type": "statement_period_range"}))
-        lines = [f"Period resolved: {self._time_scope_label(scope)}.", "", "## Daily spending trend"]
+        scope = self._context_time_scope(context)
+        resolved_label = self._time_scope_label(scope) if scope is not None else "selected range"
+        lines = [f"Period resolved: {resolved_label}.", "", "## Daily spending trend"]
 
         monthly_totals: list[tuple[str, Decimal]] = []
         overall_peak: Optional[tuple[str, dict[str, Any]]] = None
@@ -1200,16 +1196,12 @@ class RAGService:
         if isinstance(time_scope, dict):
             return RagTimeScope.model_validate(time_scope)
         if isinstance(period, str) and period.strip():
-            return RagTimeScope(scope_type="statement_period", statement_period=period.strip())
+            return RagTimeScope.from_period(period.strip())
         return None
 
     @staticmethod
     def _derive_period_from_time_scope(time_scope: Optional[RagTimeScope]) -> Optional[str]:
-        if time_scope is None:
-            return None
-        if time_scope.scope_type == "statement_period":
-            return time_scope.statement_period
-        return None
+        return time_scope.derived_period if time_scope is not None else None
 
     def _build_time_scope_interpretation(
         self,
@@ -1225,7 +1217,7 @@ class RAGService:
             "scope_type": time_scope.scope_type,
             "time_scope": time_scope.model_dump(mode="json", exclude_none=True),
         }
-        derived_period = self._derive_period_from_time_scope(time_scope)
+        derived_period = time_scope.derived_period
         if derived_period is not None:
             interpretation["resolved_period"] = derived_period
         if time_scope.start_period is not None:
@@ -1242,13 +1234,17 @@ class RAGService:
 
     @staticmethod
     def _time_scope_label(time_scope: RagTimeScope) -> str:
-        if time_scope.scope_type == "statement_period":
-            return time_scope.statement_period or "statement period"
-        if time_scope.scope_type == "statement_period_range":
-            return f"{time_scope.start_period or '?'} through {time_scope.end_period or '?'}"
-        if time_scope.scope_type == "date_range":
-            return f"{time_scope.start_date.isoformat() if time_scope.start_date else '?'} through {time_scope.end_date.isoformat() if time_scope.end_date else '?'}"
-        return time_scope.scope_type
+        return time_scope.label
+
+    @staticmethod
+    def _context_time_scope(context: dict[str, Any]) -> Optional[RagTimeScope]:
+        time_scope_payload = context.get("time_scope")
+        if not isinstance(time_scope_payload, dict):
+            return None
+        try:
+            return RagTimeScope.model_validate(time_scope_payload)
+        except Exception:
+            return None
 
     def _last_resolved_time_scope(
         self,
@@ -1274,7 +1270,7 @@ class RAGService:
                 except Exception:
                     logger.debug("Ignoring invalid persisted time_scope payload for message=%s", message.message_id)
         if isinstance(message.period, str) and message.period.strip():
-            return RagTimeScope(scope_type="statement_period", statement_period=message.period.strip())
+            return RagTimeScope.from_period(message.period.strip())
         return None
 
     @staticmethod
@@ -1479,19 +1475,19 @@ class RAGService:
         current_month_start = reference_date.replace(day=1)
 
         if time_scope.scope_type == "statement_period":
-            return bool(time_scope.statement_period and time_scope.statement_period != current_period)
+            return bool(time_scope.derived_period and time_scope.derived_period != current_period)
 
         if time_scope.scope_type == "statement_period_range":
-            start_period_date = self._statement_period_to_date(time_scope.start_period)
-            end_period_date = self._statement_period_to_date(time_scope.end_period)
-            if start_period_date is None or end_period_date is None:
-                return False
+            assert time_scope.start_period is not None
+            assert time_scope.end_period is not None
+            start_period_date = RagTimeScope.parse_statement_period(time_scope.start_period)
+            end_period_date = RagTimeScope.parse_statement_period(time_scope.end_period)
             current_period_date = current_month_start
             return not (start_period_date <= current_period_date <= end_period_date)
 
         if time_scope.scope_type == "date_range":
-            if time_scope.start_date is None or time_scope.end_date is None:
-                return False
+            assert time_scope.start_date is not None
+            assert time_scope.end_date is not None
             return time_scope.end_date < current_month_start
 
         return False
@@ -1522,39 +1518,27 @@ class RAGService:
         current_month_start = reference_date.replace(day=1)
 
         if time_scope.scope_type == "statement_period":
-            if not time_scope.statement_period:
-                return {"enabled": True, "eligible": False, "reason": "missing_statement_period"}
-            if time_scope.statement_period == current_period:
+            if time_scope.derived_period == current_period:
                 return {"enabled": True, "eligible": False, "reason": "current_month_not_cacheable"}
             return {"enabled": True, "eligible": True, "reason": None}
 
         if time_scope.scope_type == "statement_period_range":
-            start_period_date = self._statement_period_to_date(time_scope.start_period)
-            end_period_date = self._statement_period_to_date(time_scope.end_period)
-            if start_period_date is None or end_period_date is None:
-                return {"enabled": True, "eligible": False, "reason": "invalid_statement_period_range"}
+            assert time_scope.start_period is not None
+            assert time_scope.end_period is not None
+            start_period_date = RagTimeScope.parse_statement_period(time_scope.start_period)
+            end_period_date = RagTimeScope.parse_statement_period(time_scope.end_period)
             if start_period_date <= current_month_start <= end_period_date:
                 return {"enabled": True, "eligible": False, "reason": "includes_current_month_not_cacheable"}
             return {"enabled": True, "eligible": True, "reason": None}
 
         if time_scope.scope_type == "date_range":
-            if time_scope.start_date is None or time_scope.end_date is None:
-                return {"enabled": True, "eligible": False, "reason": "invalid_date_range"}
+            assert time_scope.start_date is not None
+            assert time_scope.end_date is not None
             if time_scope.end_date >= current_month_start:
                 return {"enabled": True, "eligible": False, "reason": "includes_current_month_not_cacheable"}
             return {"enabled": True, "eligible": True, "reason": None}
 
         return {"enabled": True, "eligible": False, "reason": f"unsupported_time_scope:{time_scope.scope_type}"}
-
-    @staticmethod
-    def _statement_period_to_date(period: Optional[str]) -> Optional[date]:
-        if not isinstance(period, str) or not period.strip():
-            return None
-        try:
-            return datetime.strptime(period.strip(), "%B%Y").date()
-        except ValueError:
-            logger.debug("Ignoring invalid statement period for cache policy period=%s", period)
-            return None
 
     @staticmethod
     def _cacheable_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -1652,8 +1636,9 @@ class RAGService:
 
     def _fallback_answer(self, context: dict[str, Any]) -> str:
         fragments: list[str] = []
-        selected_scope_label = context.get("period") or self._time_scope_label(
-            RagTimeScope.model_validate(context.get("time_scope", {"scope_type": "statement_period"}))
+        selected_scope = self._context_time_scope(context)
+        selected_scope_label = context.get("period") or (
+            self._time_scope_label(selected_scope) if selected_scope is not None else "the selected scope"
         )
         overview = context.get("overview")
         if isinstance(overview, dict):

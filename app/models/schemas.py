@@ -2,22 +2,106 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Optional, Union
+from typing import Any, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class AnalyticsBaseModel(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+TimeScopeType = Literal["statement_period", "statement_period_range", "date_range"]
+
+
 class RagTimeScope(AnalyticsBaseModel):
-    scope_type: str
+    model_config = ConfigDict(populate_by_name=True, extra="forbid", str_strip_whitespace=True)
+
+    scope_type: TimeScopeType
     statement_period: Optional[str] = None
     start_period: Optional[str] = None
     end_period: Optional[str] = None
     start_date: Optional[date] = None
     end_date: Optional[date] = None
+
+    @field_validator("statement_period", "start_period", "end_period")
+    @classmethod
+    def validate_statement_period_format(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        try:
+            datetime.strptime(value, "%B%Y")
+        except ValueError as exc:
+            raise ValueError("statement period must use MonthYYYY format like May2026") from exc
+        return value
+
+    @model_validator(mode="after")
+    def validate_scope_fields(self) -> RagTimeScope:
+        if self.scope_type == "statement_period":
+            if self.statement_period is None:
+                raise ValueError("statement_period is required when scope_type is statement_period")
+            if any(
+                value is not None
+                for value in (self.start_period, self.end_period, self.start_date, self.end_date)
+            ):
+                raise ValueError(
+                    "statement_period time scopes cannot include range or date boundary fields"
+                )
+            return self
+
+        if self.scope_type == "statement_period_range":
+            if self.start_period is None or self.end_period is None:
+                raise ValueError(
+                    "start_period and end_period are required when scope_type is statement_period_range"
+                )
+            if any(
+                value is not None
+                for value in (self.statement_period, self.start_date, self.end_date)
+            ):
+                raise ValueError(
+                    "statement_period_range time scopes cannot include statement_period or date boundary fields"
+                )
+            if self.parse_statement_period(self.start_period) > self.parse_statement_period(self.end_period):
+                raise ValueError("start_period must be before or equal to end_period")
+            return self
+
+        if self.start_date is None or self.end_date is None:
+            raise ValueError("start_date and end_date are required when scope_type is date_range")
+        if any(
+            value is not None
+            for value in (self.statement_period, self.start_period, self.end_period)
+        ):
+            raise ValueError(
+                "date_range time scopes cannot include statement period fields"
+            )
+        if self.start_date > self.end_date:
+            raise ValueError("start_date must be before or equal to end_date")
+        return self
+
+    @classmethod
+    def from_period(cls, period: str) -> RagTimeScope:
+        return cls(scope_type="statement_period", statement_period=period)
+
+    @staticmethod
+    def parse_statement_period(period: str) -> date:
+        return datetime.strptime(period, "%B%Y").date()
+
+    @property
+    def derived_period(self) -> Optional[str]:
+        if self.scope_type == "statement_period":
+            return self.statement_period
+        return None
+
+    @property
+    def label(self) -> str:
+        if self.scope_type == "statement_period":
+            return self.statement_period or "statement period"
+        if self.scope_type == "statement_period_range":
+            return f"{self.start_period or '?'} through {self.end_period or '?'}"
+        return (
+            f"{self.start_date.isoformat() if self.start_date else '?'} through "
+            f"{self.end_date.isoformat() if self.end_date else '?'}"
+        )
 
 
 class RagAskRequest(AnalyticsBaseModel):
