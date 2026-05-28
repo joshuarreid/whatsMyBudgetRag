@@ -70,6 +70,31 @@ class PlannerServiceTests(unittest.TestCase):
         self.assertEqual([step.payment_method for step in plan.steps], ["Visa", "Visa", "Visa"])
         self.assertEqual([step.account for step in plan.steps], ["Checking", "Checking", "Checking"])
 
+    def test_build_plan_expands_statement_period_range_for_monthly_average_questions(self) -> None:
+        categories_skill = StubSkill(skill_id="categories", context_key="categories")
+
+        plan = self.planner.build_plan(
+            question="From December to May on average how much do I spend a month on Dining Out and Groceries?",
+            skills=[categories_skill, self.range_summary_skill],
+            time_scope=RagTimeScope(
+                scope_type="statement_period_range",
+                start_period="December2025",
+                end_period="May2026",
+            ),
+            period=None,
+            payment_method=None,
+            account="josh",
+            today=date(2026, 5, 27),
+        )
+
+        self.assertEqual(plan.strategy, "multi_scope")
+        self.assertEqual(plan.steps[0].skill_id, "statement_period_summary_range")
+        self.assertEqual(
+            [step.period for step in plan.steps[1:]],
+            ["December2025", "January2026", "February2026", "March2026", "April2026", "May2026"],
+        )
+        self.assertEqual([step.skill_id for step in plan.steps[1:]], ["categories"] * 6)
+
     def test_build_plan_keeps_range_native_skills_on_original_range_scope(self) -> None:
         plan = self.planner.build_plan(
             question="Show the daily trend from December through February",

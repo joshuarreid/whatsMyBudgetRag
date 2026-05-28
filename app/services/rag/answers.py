@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+import re
 from typing import Any, Optional
 
 from app.services.rag.constants import (
@@ -213,6 +214,9 @@ class RAGAnswerMixin:
         }
 
     def _deterministic_answer(self, context: dict[str, Any]) -> Optional[str]:
+        period_category_average_answer = self._deterministic_period_category_average_answer(context)
+        if period_category_average_answer is not None:
+            return period_category_average_answer
         if self._is_deterministic_weekly_category_context(context):
             return self._deterministic_weekly_category_answer(context)
         if self._is_deterministic_daily_range_context(context):
@@ -220,6 +224,14 @@ class RAGAnswerMixin:
         if self._is_deterministic_single_scope_daily_context(context):
             return self._deterministic_single_scope_daily_answer(context)
         return None
+
+    @staticmethod
+    def _normalize_text(value: Any) -> str:
+        if not isinstance(value, str):
+            return ""
+        normalized = value.lower().replace("’", "'")
+        normalized = re.sub(r"[^a-z0-9]+", " ", normalized)
+        return re.sub(r"\s+", " ", normalized).strip()
 
     def _is_deterministic_weekly_category_context(self, context: dict[str, Any]) -> bool:
         time_scope = self._context_time_scope(context)
@@ -312,6 +324,237 @@ class RAGAnswerMixin:
         if not isinstance(steps, list):
             return []
         return [str(step.get("skill_id")) for step in steps if isinstance(step, dict) and step.get("skill_id")]
+
+    def _category_sections(self, context: dict[str, Any]) -> list[tuple[str, list[dict[str, Any]]]]:
+        execution_plan = context.get("execution_plan")
+        if not isinstance(execution_plan, dict):
+            return []
+        steps = execution_plan.get("steps")
+        if not isinstance(steps, list):
+            return []
+
+        sections: list[tuple[str, list[dict[str, Any]]]] = []
+        for step in steps:
+            if not isinstance(step, dict) or step.get("skill_id") != "categories":
+                continue
+            output_key = step.get("output_key")
+            if not isinstance(output_key, str):
+                continue
+            payload = context.get(output_key)
+            if not isinstance(payload, list):
+                continue
+            label = str(step.get("label") or step.get("period") or output_key)
+            rows = [row for row in payload if isinstance(row, dict) and row.get("category")]
+            sections.append((label, rows))
+        return sections
+
+    def _statement_period_summary_lookup(self, context: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        payload = context.get("statement_period_summary_range")
+        if not isinstance(payload, list):
+            return {}
+
+        lookup: dict[str, dict[str, Any]] = {}
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            statement_period = item.get("statement_period")
+            if not isinstance(statement_period, str) or not statement_period.strip():
+                continue
+            parsed_period = self._parse_period_label(statement_period.title())
+            if parsed_period is None:
+                continue
+            lookup[parsed_period.isoformat()] = item
+        return lookup
+
+    def _question_category_names_from_sources(
+        self,
+        *,
+        question: str,
+        category_sections: list[tuple[str, list[dict[str, Any]]]],
+        summary_lookup: dict[str, dict[str, Any]],
+    ) -> list[str]:
+        normalized_question = f" {self._normalize_text(question)} "
+        matched_categories: list[str] = []
+        seen_normalized_categories: set[str] = set()
+
+        def consider(category: Any) -> None:
+            if not isinstance(category, str) or not category.strip():
+                return
+            normalized_category = self._normalize_text(category)
+            if not normalized_category or normalized_category in seen_normalized_categories:
+                return
+            if f" {normalized_category} " not in normalized_question:
+                return
+            seen_normalized_categories.add(normalized_category)
+            matched_categories.append(category)
+
+        for _, rows in category_sections:
+            for row in rows:
+                consider(row.get("category"))
+
+        for item in summary_lookup.values():
+            category_breakdown = item.get("category_breakdown")
+            if not isinstance(category_breakdown, dict):
+                continue
+            for entries in category_breakdown.values():
+                if not isinstance(entries, list):
+                    continue
+                for row in entries:
+                    if isinstance(row, dict):
+                        consider(row.get("category"))
+
+        return matched_categories
+
+    def _summary_category_total(
+        self,
+        period_summary: dict[str, Any],
+        *,
+        account: Optional[str],
+        category: str,
+    ) -> Optional[Decimal]:
+        category_breakdown = period_summary.get("category_breakdown")
+        if not isinstance(category_breakdown, dict):
+            return None
+
+        normalized_category = self._normalize_text(category)
+
+        def total_for_account(account_name: str) -> Decimal:
+            entries = category_breakdown.get(account_name)
+            if not isinstance(entries, list):
+                return Decimal("0")
+            return sum(
+                (
+                    self._to_decimal(row.get("total_amount"))
+                    for row in entries
+                    if isinstance(row, dict)
+                    and self._normalize_text(row.get("category")) == normalized_category
+                ),
+                start=Decimal("0"),
+            )
+
+        if not account:
+            return sum(
+                (total_for_account(account_name) for account_name in category_breakdown.keys() if isinstance(account_name, str)),
+                start=Decimal("0"),
+            )
+
+        normalized_account = str(account).strip().lower()
+        if normalized_account == "joint":
+            return total_for_account("joint")
+
+        return total_for_account(normalized_account) + (total_for_account("joint") / Decimal("2"))
+
+    def _question_category_names(
+        self,
+        *,
+        question: str,
+        category_sections: list[tuple[str, list[dict[str, Any]]]],
+    ) -> list[str]:
+        normalized_question = f" {self._normalize_text(question)} "
+        matched_categories: list[str] = []
+        seen_normalized_categories: set[str] = set()
+
+        for _, rows in category_sections:
+            for row in rows:
+                category = row.get("category")
+                if not isinstance(category, str) or not category.strip():
+                    continue
+                normalized_category = self._normalize_text(category)
+                if not normalized_category or normalized_category in seen_normalized_categories:
+                    continue
+                if f" {normalized_category} " not in normalized_question:
+                    continue
+                seen_normalized_categories.add(normalized_category)
+                matched_categories.append(category)
+        return matched_categories
+
+    def _deterministic_period_category_average_answer(self, context: dict[str, Any]) -> Optional[str]:
+        time_scope = self._context_time_scope(context)
+        if time_scope is None or time_scope.scope_type != "statement_period_range":
+            return None
+
+        normalized_question = self._normalize_text(context.get("question"))
+        if not any(keyword in normalized_question for keyword in ("average", "avg", "mean")):
+            return None
+        if "month" not in normalized_question:
+            return None
+
+        category_sections = self._category_sections(context)
+        if len(category_sections) < 2:
+            return None
+
+        summary_lookup = self._statement_period_summary_lookup(context)
+
+        matched_categories = self._question_category_names_from_sources(
+            question=str(context.get("question") or ""),
+            category_sections=category_sections,
+            summary_lookup=summary_lookup,
+        )
+        if not matched_categories:
+            return None
+
+        month_count = len(category_sections)
+        period_labels = [label for label, _ in category_sections]
+        account = None
+        filters = context.get("filters")
+        if isinstance(filters, dict) and isinstance(filters.get("account"), str):
+            account = str(filters.get("account"))
+        lines = [
+            f"Average monthly spend from {period_labels[0]} through {period_labels[-1]} ({month_count} months):",
+            "",
+        ]
+
+        for category in matched_categories:
+            normalized_category = self._normalize_text(category)
+            monthly_amounts: list[Decimal] = []
+            for label, rows in category_sections:
+                summary_item = None
+                parsed_label = self._parse_period_label(label)
+                if parsed_label is not None:
+                    summary_item = summary_lookup.get(parsed_label.isoformat())
+                if isinstance(summary_item, dict):
+                    summary_total = self._summary_category_total(summary_item, account=account, category=category)
+                    if summary_total is not None:
+                        monthly_amounts.append(summary_total)
+                        continue
+                matched_row = next(
+                    (
+                        row
+                        for row in rows
+                        if self._normalize_text(row.get("category")) == normalized_category
+                    ),
+                    None,
+                )
+                monthly_amounts.append(self._to_decimal(matched_row.get("total_amount") if matched_row is not None else 0))
+
+            total_amount = sum(monthly_amounts, start=Decimal("0"))
+            average_amount = total_amount / month_count if month_count else Decimal("0")
+            lines.append(
+                f"- {category}: ${self._format_decimal(average_amount)}/month average (${self._format_decimal(total_amount)} total across {month_count} months)."
+            )
+
+        lines.extend(["", "## Monthly category totals"])
+        for label, rows in category_sections:
+            row_totals: dict[str, Decimal] = {}
+            parsed_label = self._parse_period_label(label)
+            summary_item = summary_lookup.get(parsed_label.isoformat()) if parsed_label is not None else None
+            if isinstance(summary_item, dict):
+                for category in matched_categories:
+                    summary_total = self._summary_category_total(summary_item, account=account, category=category)
+                    if summary_total is not None:
+                        row_totals[self._normalize_text(category)] = summary_total
+            if not row_totals:
+                row_totals = {
+                    self._normalize_text(row.get("category")): self._to_decimal(row.get("total_amount"))
+                    for row in rows
+                }
+            category_summaries = ", ".join(
+                f"{category} ${self._format_decimal(row_totals.get(self._normalize_text(category), Decimal('0')))}"
+                for category in matched_categories
+            )
+            lines.append(f"- {label}: {category_summaries}")
+
+        return "\n".join(lines)
 
     def _is_deterministic_daily_range_context(self, context: dict[str, Any]) -> bool:
         time_scope = self._context_time_scope(context)

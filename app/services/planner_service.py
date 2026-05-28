@@ -27,6 +27,10 @@ WEEKLY_BREAKDOWN_KEYWORD_PATTERN = re.compile(
     r"\b(?:weekly|per\s+week|by\s+week|each\s+week|week\s*[- ]\s*by\s*[- ]\s*week)\b",
     re.IGNORECASE,
 )
+MONTHLY_AVERAGE_KEYWORD_PATTERN = re.compile(
+    r"\bon\s+average\b|\b(?:average|avg|mean)\b.*\b(?:per|each|a)\s+month\b|\b(?:per|each|a)\s+month\b.*\b(?:average|avg|mean)\b",
+    re.IGNORECASE,
+)
 MAX_MULTI_PERIOD_STEPS = 24
 
 
@@ -178,7 +182,10 @@ class PlannerService:
     @staticmethod
     def _requires_period_expansion(question: str) -> bool:
         lowered = question.lower()
-        return bool(COMPARISON_KEYWORD_PATTERN.search(question)) or any(
+        return (
+            bool(COMPARISON_KEYWORD_PATTERN.search(question))
+            or bool(MONTHLY_AVERAGE_KEYWORD_PATTERN.search(question))
+            or any(
             phrase in lowered
             for phrase in (
                 "daily",
@@ -187,6 +194,7 @@ class PlannerService:
                 "each month",
                 "per month",
             )
+        )
         )
 
     @staticmethod

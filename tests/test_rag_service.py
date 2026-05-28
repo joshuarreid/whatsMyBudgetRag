@@ -709,6 +709,130 @@ class RAGServiceLatencyOptimizationTests(unittest.TestCase):
         self.assertIn("- 2026-04-01: $100.00 across 4 transactions", answer)
         self.assertNotIn("\\n", answer)
 
+    def test_deterministic_range_category_average_answer_uses_monthly_category_totals(self) -> None:
+        service = RAGService(Mock(), Mock(), None)
+
+        answer = service._deterministic_answer(
+            {
+                "question": "From December to May on average how much do I spend a month on Dining Out and Groceries?",
+                "time_scope": {
+                    "scope_type": "statement_period_range",
+                    "start_period": "December2025",
+                    "end_period": "May2026",
+                },
+                "filters": {"account": "josh", "payment_method": None},
+                "execution_plan": {
+                    "strategy": "multi_scope",
+                    "steps": [
+                        {"skill_id": "categories", "output_key": "categories_december2025", "label": "December2025"},
+                        {"skill_id": "categories", "output_key": "categories_january2026", "label": "January2026"},
+                        {"skill_id": "categories", "output_key": "categories_february2026", "label": "February2026"},
+                        {"skill_id": "categories", "output_key": "categories_march2026", "label": "March2026"},
+                        {"skill_id": "categories", "output_key": "categories_april2026", "label": "April2026"},
+                        {"skill_id": "categories", "output_key": "categories_may2026", "label": "May2026"},
+                    ],
+                },
+                "statement_period_summary_range": [
+                    {
+                        "statement_period": "DECEMBER2025",
+                        "category_breakdown": {
+                            "josh": [{"category": "Dining Out", "total_amount": "60.63", "transaction_count": 6}],
+                            "joint": [
+                                {"category": "Dining Out", "total_amount": "424.07", "transaction_count": 24},
+                                {"category": "Groceries", "total_amount": "1261.67", "transaction_count": 29},
+                            ],
+                        },
+                    },
+                    {
+                        "statement_period": "JANUARY2026",
+                        "category_breakdown": {
+                            "josh": [
+                                {"category": "Dining Out", "total_amount": "7.70", "transaction_count": 1},
+                                {"category": "Groceries", "total_amount": "15.25", "transaction_count": 1},
+                            ],
+                            "joint": [
+                                {"category": "Dining Out", "total_amount": "436.01", "transaction_count": 27},
+                                {"category": "Groceries", "total_amount": "960.81", "transaction_count": 35},
+                            ],
+                        },
+                    },
+                    {
+                        "statement_period": "FEBRUARY2026",
+                        "category_breakdown": {
+                            "josh": [{"category": "Dining Out", "total_amount": "79.17", "transaction_count": 13}],
+                            "joint": [
+                                {"category": "Dining Out", "total_amount": "409.92", "transaction_count": 32},
+                                {"category": "Groceries", "total_amount": "633.93", "transaction_count": 22},
+                            ],
+                        },
+                    },
+                    {
+                        "statement_period": "MARCH2026",
+                        "category_breakdown": {
+                            "josh": [{"category": "Dining Out", "total_amount": "37.57", "transaction_count": 5}],
+                            "joint": [
+                                {"category": "Dining Out", "total_amount": "243.50", "transaction_count": 20},
+                                {"category": "Groceries", "total_amount": "618.55", "transaction_count": 23},
+                            ],
+                        },
+                    },
+                    {
+                        "statement_period": "APRIL2026",
+                        "category_breakdown": {
+                            "josh": [
+                                {"category": "Dining Out", "total_amount": "8.29", "transaction_count": 2},
+                                {"category": "Groceries", "total_amount": "3.00", "transaction_count": 1},
+                            ],
+                            "joint": [
+                                {"category": "Dining Out", "total_amount": "426.81", "transaction_count": 30},
+                                {"category": "Groceries", "total_amount": "502.41", "transaction_count": 20},
+                            ],
+                        },
+                    },
+                    {
+                        "statement_period": "MAY2026",
+                        "category_breakdown": {
+                            "joint": [
+                                {"category": "Dining Out", "total_amount": "297.60", "transaction_count": 24},
+                                {"category": "Groceries", "total_amount": "499.06", "transaction_count": 14},
+                            ],
+                        },
+                    },
+                ],
+                "categories_december2025": [
+                    {"category": "Dining Out", "total_amount": "484.70", "transaction_count": 30},
+                    {"category": "Groceries", "total_amount": "1261.67", "transaction_count": 29},
+                ],
+                "categories_january2026": [
+                    {"category": "Dining Out", "total_amount": "443.71", "transaction_count": 28},
+                    {"category": "Groceries", "total_amount": "976.06", "transaction_count": 36},
+                ],
+                "categories_february2026": [
+                    {"category": "Dining Out", "total_amount": "489.09", "transaction_count": 45},
+                    {"category": "Groceries", "total_amount": "633.93", "transaction_count": 22},
+                ],
+                "categories_march2026": [
+                    {"category": "Dining Out", "total_amount": "281.07", "transaction_count": 25},
+                    {"category": "Groceries", "total_amount": "618.55", "transaction_count": 23},
+                ],
+                "categories_april2026": [
+                    {"category": "Dining Out", "total_amount": "451.99", "transaction_count": 33},
+                    {"category": "Groceries", "total_amount": "505.41", "transaction_count": 21},
+                ],
+                "categories_may2026": [
+                    {"category": "Dining Out", "total_amount": "297.60", "transaction_count": 24},
+                    {"category": "Groceries", "total_amount": "499.06", "transaction_count": 14},
+                ],
+            }
+        )
+
+        assert answer is not None
+        self.assertIn("Average monthly spend from December2025 through May2026 (6 months):", answer)
+        self.assertIn("- Dining Out: $218.72/month average ($1312.32 total across 6 months).", answer)
+        self.assertIn("- Groceries: $376.08/month average ($2256.46 total across 6 months).", answer)
+        self.assertIn("## Monthly category totals", answer)
+        self.assertIn("- December2025: Dining Out $272.66, Groceries $630.84", answer)
+
 
 class RAGServiceLangGraphReasoningTests(unittest.TestCase):
     def test_select_skills_can_expand_reasoning_families_with_langgraph(self) -> None:
