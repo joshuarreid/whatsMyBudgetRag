@@ -59,9 +59,9 @@ YEAR_REFERENCE_PATTERN = re.compile(r"\b(?P<year>20\d{2})\b")
 CURRENT_YEAR_PATTERN = re.compile(r"\b(?:this|current)\s+year\b", re.IGNORECASE)
 LAST_YEAR_PATTERN = re.compile(r"\b(?:last|previous)\s+year\b", re.IGNORECASE)
 MONTH_RANGE_PATTERN = re.compile(
-    rf"\b(?P<start_month>{STATEMENT_PERIOD_MONTH_PATTERN})(?:\s+(?P<start_year>\d{{4}}))?\s+"
+    rf"\b(?P<start_month>{STATEMENT_PERIOD_MONTH_PATTERN})(?:\s*(?P<start_year>\d{{4}}))?\s+"
     rf"(?:through|thru|to|until)\s+"
-    rf"(?P<end_month>{STATEMENT_PERIOD_MONTH_PATTERN})(?:\s+(?P<end_year>\d{{4}}))?\b",
+    rf"(?P<end_month>{STATEMENT_PERIOD_MONTH_PATTERN})(?:\s*(?P<end_year>\d{{4}}))?\b",
     re.IGNORECASE,
 )
 END_OF_MONTH_PATTERN = re.compile(

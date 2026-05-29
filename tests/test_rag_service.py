@@ -95,6 +95,20 @@ class RAGServicePeriodResolutionTests(unittest.TestCase):
         self.assertEqual(resolved_time_scope.statement_period, "October2025")
         self.assertEqual(interpretation["source"], "question_bare_month")
 
+    def test_explicit_compact_range_overrides_requested_single_period(self) -> None:
+        resolved_time_scope, interpretation = self.service._resolve_time_scope(
+            question="For statement periods JANUARY2026 through MAY2026, how much have I spent on average a month on dining out?",
+            time_scope=RagTimeScope(scope_type="statement_period", statement_period="January2026"),
+            period="January2026",
+            transaction_id=None,
+            today=date(2026, 5, 29),
+        )
+
+        self.assertEqual(resolved_time_scope.scope_type, "statement_period_range")
+        self.assertEqual(resolved_time_scope.start_period, "January2026")
+        self.assertEqual(resolved_time_scope.end_period, "May2026")
+        self.assertEqual(interpretation["source"], "question_statement_period_range")
+
     def test_bare_month_resolves_to_most_recent_matching_period(self) -> None:
         resolved_time_scope, interpretation = self.service._resolve_time_scope(
             question="What was my spend in October?",

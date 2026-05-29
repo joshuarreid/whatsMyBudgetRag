@@ -12,15 +12,15 @@ from app.skills.base import Skill
 
 COMPARISON_KEYWORD_PATTERN = re.compile(r"\b(?:compare|comparison|versus|vs\.?|against)\b", re.IGNORECASE)
 EXPLICIT_PERIOD_PAIR_PATTERN = re.compile(
-    rf"\b(?P<left>{STATEMENT_PERIOD_MONTH_PATTERN})(?:\s+(?P<left_year>\d{{4}}))?\s+"
+    rf"\b(?P<left>{STATEMENT_PERIOD_MONTH_PATTERN})(?:\s*(?P<left_year>\d{{4}}))?\s+"
     rf"(?:vs\.?|versus|against)\s+"
-    rf"(?P<right>{STATEMENT_PERIOD_MONTH_PATTERN})(?:\s+(?P<right_year>\d{{4}}))?\b",
+    rf"(?P<right>{STATEMENT_PERIOD_MONTH_PATTERN})(?:\s*(?P<right_year>\d{{4}}))?\b",
     re.IGNORECASE,
 )
 COMPARISON_AND_PAIR_PATTERN = re.compile(
-    rf"\bcompare\b.*?\b(?P<left>{STATEMENT_PERIOD_MONTH_PATTERN})(?:\s+(?P<left_year>\d{{4}}))?\s+"
+    rf"\bcompare\b.*?\b(?P<left>{STATEMENT_PERIOD_MONTH_PATTERN})(?:\s*(?P<left_year>\d{{4}}))?\s+"
     rf"(?:and|to|with)\s+"
-    rf"(?P<right>{STATEMENT_PERIOD_MONTH_PATTERN})(?:\s+(?P<right_year>\d{{4}}))?\b",
+    rf"(?P<right>{STATEMENT_PERIOD_MONTH_PATTERN})(?:\s*(?P<right_year>\d{{4}}))?\b",
     re.IGNORECASE,
 )
 WEEKLY_BREAKDOWN_KEYWORD_PATTERN = re.compile(

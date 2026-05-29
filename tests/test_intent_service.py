@@ -130,6 +130,22 @@ class IntentServiceInferenceTests(unittest.TestCase):
             },
         )
 
+    def test_infer_time_scope_resolves_compact_monthyear_range_to_statement_period_range(self) -> None:
+        inferred_scope = self.service.infer_time_scope(
+            question="For statement periods JANUARY2026 through MAY2026, how much did I spend?",
+            today=date(2026, 5, 29),
+        )
+
+        self.assertIsNotNone(inferred_scope)
+        self.assertEqual(
+            inferred_scope["time_scope"],
+            {
+                "scope_type": "statement_period_range",
+                "start_period": "January2026",
+                "end_period": "May2026",
+            },
+        )
+
     def test_infer_time_scope_resolves_explicit_current_year_to_year_to_date_statement_period_range(self) -> None:
         inferred_scope = self.service.infer_time_scope(
             question="How much do I spend a month on average in 2026 on nonessential items?",
